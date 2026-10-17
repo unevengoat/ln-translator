@@ -448,7 +448,7 @@ export async function stats(store, { fetchFn } = {}) {
   const warns = translations.reduce((n, t) => n + (t.qa?.warns || 0) + (t.qa?.errors || 0), 0);
   return {
     works: works.length,
-    volumes: works.reduce((n, w) => n + (w.volumes || []).filter((v) => v.label).length, 0),
+    volumes: works.reduce((n, w) => n + (w.volumes || []).filter((v) => v.label && w.chapters.some((c) => (c.volumeKey || "") === v.key)).length, 0),
     chapters: works.reduce((n, w) => n + w.chapters.length, 0),
     translations: translations.length,
     terms: works.reduce((n, w) => n + Object.values(w.terms || {}).reduce((a, b) => a + b, 0), 0),

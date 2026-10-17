@@ -35,6 +35,60 @@ fill in every missing chapter for the selected language.
 - The reader gets a volume selector, and Prev/Next walks across volume boundaries.
 - Volume markers are optional: without one, chapters simply live in the default group.
 
+## Reading levels (easy / medium / hard)
+
+The same chapter can exist at three levels **per language**, for language learners:
+
+| Level | What the model is told to do |
+|---|---|
+| **Easy** | Simplest common words, short sentences, one idea per sentence (≈A2). No idioms or subordinate clauses. |
+| **Medium** | Natural everyday prose (≈B1–B2) — the default novel style. |
+| **Hard** | Rich, precise vocabulary and complex grammar, preserving literary nuance (≈C1+). |
+
+- Levels are stored **independently** (own translation + own translation memory), so
+  translating a chapter to Easy never touches Medium or Hard.
+- **Names/terms are identical at every level** — the model is explicitly told never to
+  simplify a glossary term, and a term correction rewrites **all three levels**.
+- In the reader, pick the level next to the language (shortcuts `1`/`2`/`3`), or use
+  **Translate whole story** to fill one level or all three.
+- Same language + a level = **rewrite/simplify** (e.g. English → Easy English), which is
+  allowed and useful for learners.
+
+## Reading look
+
+10 themes (Auto, Light, Sepia, Parchment, Solarized, Rose, Dark, Slate, Forest, Night),
+4 font families (serif, sans, dyslexia-friendly, mono), font size, line spacing, column
+width, justify toggle, a reading-progress bar, and Prev/Next at the bottom of the text.
+All of it is remembered per browser.
+
+## Adding content (the easy flow)
+
+1. Story title + author (+ optional Volume). The form **remembers your last story**.
+2. **＋ Add to this story** from a story page pre-fills everything *and* works out the
+   next chapter number ("next up: Volume 2 · Chapter 4 of 12 existing").
+3. Paste a chapter, several chapters, or a whole volume — or upload
+   `.txt` / `.md` / `.html` / `.epub` / **`.pdf`** (PDFs get paragraph detection and
+   watermark/header stripping).
+4. Markers auto-detect: `Volume 2`, `Vol. 2`, `第1巻`, `Chapter 3`, `第2話`; the source
+   language is auto-detected; **Preview split** shows the result first.
+5. Pick languages and levels → **Save & translate** (runs in the background, with progress).
+
+## Free-tier reality check (important)
+
+Groq's free tier rate-limits hard: translating one 1,800-character chunk commonly returns
+`retry-after` of **9–25 seconds**, and sustained runs get blocked for minutes. Measured on
+this project: one ~26-chunk chapter (Swedish, medium) completed; a run of five chapters at
+once exhausted both Groq *and* Gemini free quotas.
+
+So: the app now **serialises and paces** calls (one at a time, `AI_MIN_INTERVAL_MS`,
+default 1200 ms) and retries 6× honouring `Retry-After`, and **progress is saved per chunk**
+— a failed chapter resumes from where it stopped instead of restarting.
+
+Practical guidance for a 7-volume story:
+- Translate **volume by volume, one language, one level at a time**, and let it run.
+- Or raise the ceiling: a paid Groq tier (or more keys) removes the bottleneck entirely.
+- `AI_MIN_INTERVAL_MS` / `AI_RETRY_BASE_MS` are env vars if you want to tune pacing.
+
 ## Free, durable storage (fixes "library resets on redeploy")
 
 The library lives outside the app container. `src/store.js` auto-selects a backend,
