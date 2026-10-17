@@ -44,6 +44,28 @@ export function pickCandidates(provider, ids) {
     .slice(0, 2);
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Is this error worth retrying on the same provider? (rate limit / transient) */
+function isTransient(message = "") {
+  return /HTTP (408|409|425|429|500|502|503|504)|timeout|timed out|fetch failed|ECONNRESET|socket hang up|aborted/i.test(message);
+}
+
+/** One model call with exponential backoff + jitter on transient failures. */
+async function callWithRetry(fn, { attempts = 3, baseMs = 800 } = {}) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      if (!isTransient(e.message) || i === attempts - 1) throw e;
+      await sleep(baseMs * 2 ** i + Math.floor(Math.random() * 250));
+    }
+  }
+  throw lastErr;
+}
+
 function envKey(provider) {
   const preset = PROVIDERS[provider];
   if (!preset) return "";
@@ -58,7 +80,7 @@ function envKey(provider) {
 export async function translateWithPolicy(chunk, opts = {}) {
   const {
     source = "auto", target = "en", keepHonorifics = true, formality = "match",
-    glossary = [], prevTail = "", pinned = null, strict = true,
+    glossary = [], prevTail = "", pinned = null, strict = true, notes = "",
     fetchFn = fetch, timeoutMs = 120000,
   } = opts;
   const legs = [];
@@ -87,9 +109,9 @@ export async function translateWithPolicy(chunk, opts = {}) {
       triedModels.add(model);
       try {
         const config = resolveProvider(leg.provider, { model, apiKey, timeoutMs });
-        const text = await translateAiChunk(chunk, {
-          source, target, keepHonorifics, formality, glossary, prevTail, config, fetchFn,
-        });
+        const text = await callWithRetry(() =>
+          translateAiChunk(chunk, { source, target, keepHonorifics, formality, glossary, prevTail, notes, config, fetchFn })
+        );
         attempts.push({ provider: `${leg.provider}/${model}`, ok: true });
         return { text, provider: leg.provider, model, attempts };
       } catch (e) {

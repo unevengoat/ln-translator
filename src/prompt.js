@@ -1,7 +1,7 @@
 // Novel-style prompt builder for the AI engine.
 import { glossaryPromptLines, parseGlossary } from "./glossary.js";
 
-export function buildSystemPrompt({ sourceName, targetName, keepHonorifics = true, formality = "match", glossary = [] }) {
+export function buildSystemPrompt({ sourceName, targetName, keepHonorifics = true, formality = "match", glossary = [], notes = "" }) {
   const terms = glossaryPromptLines(glossary);
   const honorificLine = keepHonorifics
     ? "Keep Japanese/Korean/Chinese honorifics and suffixes (-san, -sama, -kun, -chan, -senpai, -sensei, oppa, hyung, etc.) and culturally specific terms untranslated/romanized where natural; never localize names."
@@ -22,6 +22,7 @@ export function buildSystemPrompt({ sourceName, targetName, keepHonorifics = tru
     `6. ${formalityLine}`,
     terms.length ? `7. GLOSSARY (must follow exactly):\n${terms.join("\n")}` : null,
     "7. If a line is already in the target language or is untranslatable (system windows, stats), leave it as-is.",
+    notes ? `STORY NOTES (from the translator, must follow):\n${notes}` : null,
   ]
     .filter(Boolean)
     .join("\n")

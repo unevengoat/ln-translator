@@ -1,5 +1,8 @@
 // Term memory: one entry per original term, with a canonical form PER TARGET
-// language. Rules the user asked for:
+// language. Operates on a plain terms object ({ [source]: term }) so it can live
+// in its own per-story file (store.loadTerms/saveTerms).
+//
+// Rules the user asked for:
 //  - Latin-script terms keep the original form automatically ("ideally the original").
 //  - CJK/first-sight form: the model's first translation becomes canonical
 //    (stability = the same input always maps to the same output).
@@ -10,11 +13,7 @@ import { parseGlossary } from "./glossary.js";
 
 const KATAKANA_RUN = /[ァ-ヶー]{2,}/g;
 const LATIN_NAME = /\b[A-ZÀ-Þ][a-zà-ÿ]{2,}(?:[ '\-][A-ZÀ-Þ][a-zà-ÿ]{2,})?/g;
-const isLatin = (s) => /^[A-Za-zÀ-ÿ'’.\- ]+$/.test(s) && /[A-Za-zÀ-ÿ]/.test(s);
-export const isLatinText = isLatin;
-export const latinCandidates = (text, cap = 120) => extractCandidates(text, cap).filter(isLatin);
-
-const termKey = (workId, source) => `${workId} ${source}`;
+export const isLatinText = (s) => /^[A-Za-zÀ-ÿ'’.\- ]+$/.test(s) && /[A-Za-zÀ-ÿ]/.test(s);
 
 /** Cheap candidates (no model call): katakana runs + Latin names. */
 export function extractCandidates(text, cap = 120) {
@@ -27,9 +26,11 @@ export function extractCandidates(text, cap = 120) {
   return [...found.keys()];
 }
 
+export const latinCandidates = (text, cap = 120) => extractCandidates(text, cap).filter(isLatinText);
+
 /** Latin terms are canonical as-is; others need a model/user decision. */
 export function canonicalFor(source) {
-  if (isLatin(source)) return { canonical: source, auto: true };
+  if (isLatinText(source)) return { canonical: source, auto: true };
   return { canonical: null, auto: false };
 }
 
@@ -43,12 +44,7 @@ export async function extractTermsWithModel(sourceSample, { source = "auto", tar
     model: config.model,
     temperature: 0,
     messages: [
-      {
-        role: "system",
-        content:
-          "You list proper names from a novel passage. Reply with ONLY a JSON array like " +
-          '[{"source":"キリト","translation":"Kirito"}]. No commentary, no code fences.',
-      },
+      { role: "system", content: "You list proper names from a novel passage. Reply with ONLY a JSON array like " + '[{"source":"キリト","translation":"Kirito"}]. No commentary, no code fences.' },
       {
         role: "user",
         content:
@@ -61,32 +57,25 @@ export async function extractTermsWithModel(sourceSample, { source = "auto", tar
   };
   const res = await fetchFn(`${config.baseUrl}/chat/completions`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
-      ...(config.headers || {}),
-    },
+    headers: { "Content-Type": "application/json", ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}), ...(config.headers || {}) },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(config.timeoutMs ?? 60000),
   });
   if (!res.ok) throw new Error(`term extraction HTTP ${res.status}`);
   const data = await res.json();
   const raw = String(data?.choices?.[0]?.message?.content || "").replace(/```json|```/g, "").trim();
-  const slice = raw.slice(raw.indexOf("["), raw.lastIndexOf("]") + 1);
-  const arr = JSON.parse(slice);
+  const arr = JSON.parse(raw.slice(raw.indexOf("["), raw.lastIndexOf("]") + 1));
   return arr.filter((e) => e && e.source && e.translation).map((e) => ({ source: String(e.source), translation: String(e.translation) }));
 }
 
-/** Merge model/user pairs into the work's term table for `lang`. */
-export function mergeTerms(db, workId, lang, pairs) {
+/** Merge model/user pairs into a terms object for `lang`. Returns how many were added. */
+export function mergeTerms(terms, lang, pairs) {
   let added = 0;
-  for (const { source, translation } of pairs || []) {
+  for (const pair of pairs || []) {
+    const source = pair?.source;
+    const translation = pair?.translation ?? pair?.target;
     if (!source || !translation) continue;
-    const key = termKey(workId, source);
-    let term = db.terms[key];
-    if (!term) {
-      term = db.terms[key] = { workId, source, origin: "auto", at: Date.now(), langs: {} };
-    }
+    const term = terms[source] || (terms[source] = { source, origin: "auto", at: Date.now(), langs: {} });
     const { canonical, auto } = canonicalFor(source);
     const slot = term.langs[lang] || (term.langs[lang] = { canonical: null, variants: [], origin: "auto", at: Date.now() });
     if (!slot.canonical) {
@@ -101,10 +90,10 @@ export function mergeTerms(db, workId, lang, pairs) {
   return added;
 }
 
-/** Glossary rows [{source, target}] for a work+lang, longest-source-first. */
-export function termsGlossary(db, workId, lang) {
-  return Object.values(db.terms)
-    .filter((t) => t.workId === workId && t.langs?.[lang]?.canonical)
+/** Glossary rows [{source, target}] for a language, longest-source-first. */
+export function termsGlossary(terms, lang) {
+  return Object.values(terms)
+    .filter((t) => t.langs?.[lang]?.canonical)
     .map((t) => ({ source: t.source, target: t.langs[lang].canonical }))
     .sort((a, b) => b.source.length - a.source.length);
 }
@@ -114,6 +103,48 @@ export function termForms(term, lang) {
   const slot = term?.langs?.[lang];
   if (!slot) return [];
   return [slot.canonical, ...(slot.variants || [])].filter(Boolean);
+}
+
+/** Per-language counts, for stats. */
+export function termCounts(terms) {
+  const out = {};
+  for (const t of Object.values(terms)) for (const lang of Object.keys(t.langs || {})) out[lang] = (out[lang] || 0) + 1;
+  return out;
+}
+
+/* ---- bulk import/export (CSV or JSON) ---- */
+
+export function termsToCsv(terms, lang) {
+  const rows = [["source", "canonical"]];
+  for (const t of Object.values(terms)) {
+    const c = t.langs?.[lang]?.canonical;
+    if (c) rows.push([t.source, c]);
+  }
+  return rows.map((r) => r.map((v) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v)).join(",")).join("\n") + "\n";
+}
+
+export function parseCsv(text) {
+  const rows = [];
+  let row = [], field = "", inQuotes = false;
+  const s = String(text).replace(/\r\n?/g, "\n");
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inQuotes) {
+      if (ch === '"' && s[i + 1] === '"') { field += '"'; i++; }
+      else if (ch === '"') inQuotes = false;
+      else field += ch;
+    } else if (ch === '"') inQuotes = true;
+    else if (ch === ",") { row.push(field); field = ""; }
+    else if (ch === "\n") { row.push(field); rows.push(row); row = []; field = ""; }
+    else field += ch;
+  }
+  if (field || row.length) { row.push(field); rows.push(row); }
+  return rows.filter((r) => r.some((c) => c.trim() !== ""));
+}
+
+/** Accepts CSV ("source,canonical"), "a=b" lines, or JSON. Returns [{source, target}]. */
+export function parseTermsInput(input, lang) {
+  return parseGlossary(input);
 }
 
 export { parseGlossary };

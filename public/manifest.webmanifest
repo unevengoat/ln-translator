@@ -1,0 +1,17 @@
+{
+  "name": "LN Translator — Light Novel Library",
+  "short_name": "LN Translator",
+  "description": "Translate and read light novels / web novels with consistent names across chapters.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f1ea",
+  "theme_color": "#b3541e",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' fill='%23b3541e'/%3E%3Ctext x='96' y='132' font-size='110' text-anchor='middle'%3E%F0%9F%93%96%3C/text%3E%3C/svg%3E",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

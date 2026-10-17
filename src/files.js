@@ -23,20 +23,25 @@ function htmlToText(html) {
 
 export async function readInput(filePath) {
   const ext = path.extname(filePath).toLowerCase();
-  if (ext === ".epub") return readEpub(filePath);
-  const raw = await readFile(filePath, "utf8");
+  return parseBuffer(path.basename(filePath), await readFile(filePath));
+}
+
+/** Parse an uploaded file's bytes into novel text (.txt/.md/.html/.epub). */
+export async function parseBuffer(name, buffer) {
+  const ext = path.extname(name).toLowerCase();
+  if (ext === ".epub") return epubToText(buffer);
+  const raw = buffer.toString("utf8");
   if (ext === ".html" || ext === ".htm") return htmlToText(raw);
   return raw.replace(/\r\n?/g, "\n").trim() + "\n";
 }
 
-async function readEpub(filePath) {
+async function epubToText(buf) {
   let JSZip;
   try {
     ({ default: JSZip } = await import("jszip"));
   } catch {
     throw new Error("EPUB support needs the 'jszip' dependency — run: npm install");
   }
-  const buf = await readFile(filePath);
   const zip = await JSZip.loadAsync(buf);
   const opfPath = Object.keys(zip.files).find((f) => f.toLowerCase().endsWith(".opf"));
   if (!opfPath) throw new Error("Invalid EPUB: no .opf found");

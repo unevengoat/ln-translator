@@ -1,13 +1,16 @@
-# Render blueprint — LN Translator (website + shared library).
+# Render blueprint — LN Translator (website + durable shared library).
 #
 # Deploy: push to GitHub, then Render Dashboard → New → Web Service → pick the
-# repo (render.yaml is picked up), or use the Render API. Add the two free model
-# keys under Environment; they stay server-side and drive the Auto chain.
+# repo (render.yaml is picked up), or use the Render API directly.
 #
-# IMPORTANT (persistence): Render's free plan has an EPHEMERAL filesystem, so the
-# shared library at DATA_DIR resets on every deploy/restart. For a real
-# Wikipedia-style library, add a Render Disk (paid) and point DATA_DIR at it —
-# the disk block below is ready, just uncomment and remove `plan: free`.
+# STORAGE (durable, free) — the app auto-selects, first configured wins:
+#   1. Cloudflare R2  (10 GB free, no egress)  → R2_ACCOUNT_ID, R2_ACCESS_KEY_ID,
+#      R2_SECRET_ACCESS_KEY, R2_BUCKET.  Requires R2 enabled in the CF dashboard.
+#   2. GitHub repo    (free forever, versioned) → GH_DATA_REPO, GH_TOKEN.
+#      This is the default and what the live site below uses.
+#   3. Local disk     → dev fallback; ephemeral on Render free (data resets).
+#
+# Optional: EDIT_TOKEN protects write endpoints (set a value once you share wider).
 services:
   - type: web
     name: ln-translator
@@ -15,19 +18,33 @@ services:
     plan: free
     buildCommand: npm install
     startCommand: npm start
-    healthCheckPath: /api/stats
+    healthCheckPath: /api/health
     envVars:
       - key: NODE_VERSION
         value: "22"
-      # Primary model (Groq) — set in the dashboard, never in the repo.
+      # Primary model (Groq). Extreme backup is Gemini.
       - key: GROQ_API_KEY
         sync: false
-      # Extreme backup only (Gemini). Only used if Groq is gone/quota-exhausted.
       - key: GEMINI_API_KEY
         sync: false
-      # Where the shared library lives. Defaults to ./data inside the container.
-      - key: DATA_DIR
-        value: /var/data
+      # Durable storage in a GitHub repo (private). Token needs repo scope.
+      - key: GH_DATA_REPO
+        value: unevengoat/ln-translator-data
+      - key: GH_TOKEN
+        sync: false
+      # Optional: protect editing (empty = open editing for trusted users).
+      - key: EDIT_TOKEN
+        value: ""
+      # --- Cloudflare R2 alternative (uncomment + fill to switch backends) ---
+      # - key: R2_ACCOUNT_ID
+      #   sync: false
+      # - key: R2_ACCESS_KEY_ID
+      #   sync: false
+      # - key: R2_SECRET_ACCESS_KEY
+      #   sync: false
+      # - key: R2_BUCKET
+      #   value: ln-translator
+    # A Render Disk (paid) is an alternative to GitHub/R2 for persistence:
     # disk:
     #   name: ln-library
     #   mountPath: /var/data
