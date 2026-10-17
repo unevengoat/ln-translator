@@ -1,5 +1,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+// Tests stub the network, so no need to pace calls like production does.
+process.env.AI_MIN_INTERVAL_MS = "0";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";

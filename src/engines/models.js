@@ -48,19 +48,43 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Is this error worth retrying on the same provider? (rate limit / transient) */
 function isTransient(message = "") {
-  return /HTTP (408|409|425|429|500|502|503|504)|timeout|timed out|fetch failed|ECONNRESET|socket hang up|aborted/i.test(message);
+  return /HTTP (408|409|425|429|500|502|503|504)|timeout|timed out|fetch failed|ECONNRESET|socket hang up|aborted|rate limit|quota/i.test(message);
 }
 
-/** One model call with exponential backoff + jitter on transient failures. */
-async function callWithRetry(fn, { attempts = 3, baseMs = 800 } = {}) {
+/** Provider-requested wait, e.g. "retry-after=12" appended to the error message. */
+function retryAfterMs(message = "") {
+  const m = String(message).match(/retry[- _]?after[=:\s]+(\d+(?:\.\d+)?)/i);
+  return m ? Math.min(Number(m[1]) * 1000, 120000) : 0;
+}
+
+/* One model call at a time, spaced out — free tiers rate-limit hard, and parallel
+   jobs used to trip every limit at once. */
+const minGapMs = () => Number(process.env.AI_MIN_INTERVAL_MS ?? 1200);
+let callChain = Promise.resolve();
+let lastCallAt = 0;
+function paced(fn) {
+  const run = callChain.then(async () => {
+    const wait = Math.max(0, lastCallAt + minGapMs() - Date.now());
+    if (wait > 0) await sleep(wait);
+    lastCallAt = Date.now();
+    return fn();
+  });
+  callChain = run.then(() => {}, () => {});
+  return run;
+}
+
+/** One model call with exponential backoff + jitter, honouring Retry-After. */
+async function callWithRetry(fn, { attempts = 4, baseMs = 1500 } = {}) {
   let lastErr;
   for (let i = 0; i < attempts; i++) {
     try {
-      return await fn();
+      return await paced(fn);
     } catch (e) {
       lastErr = e;
       if (!isTransient(e.message) || i === attempts - 1) throw e;
-      await sleep(baseMs * 2 ** i + Math.floor(Math.random() * 250));
+      const asked = retryAfterMs(e.message);
+      const backoff = Math.max(asked, baseMs * 2 ** i) + Math.floor(Math.random() * 400);
+      await sleep(backoff);
     }
   }
   throw lastErr;

@@ -15,6 +15,18 @@ const KATAKANA_RUN = /[ァ-ヶー]{2,}/g;
 const LATIN_NAME = /\b[A-ZÀ-Þ][a-zà-ÿ]{2,}(?:[ '\-][A-ZÀ-Þ][a-zà-ÿ]{2,})?/g;
 export const isLatinText = (s) => /^[A-Za-zÀ-ÿ'’.\- ]+$/.test(s) && /[A-Za-zÀ-ÿ]/.test(s);
 
+// Words that are capitalised only because of sentence position or formatting —
+// never treat these as character/place names.
+const STOPWORDS = new Set(`the and but for with from that this when chapter volume vol book part prologue epilogue
+copyright translation translated cover art names any all his her its their our your my he she they we you i it
+one two three first second third next last new old good bad great little big long short right left
+yes no not now then there here what who whom whose which why how where when while because if so as at by
+in on of to up down out over under again more most some such only own same than too very can will just
+should could would may might must shall do does did done have has had having be been being am is are was were
+about after before during into through between against without within along across behind beyond
+thank thanks note notes page pages sign visit us or exclusive content
+mister missus lord lady king queen prince princess saint sir madam`.split(/\s+/).filter(Boolean));
+
 /** Cheap candidates (no model call): katakana runs + Latin names. */
 export function extractCandidates(text, cap = 120) {
   const found = new Map();
@@ -26,13 +38,32 @@ export function extractCandidates(text, cap = 120) {
   return [...found.keys()];
 }
 
-export const latinCandidates = (text, cap = 120) => extractCandidates(text, cap).filter(isLatinText);
+/**
+ * Latin terms worth keeping: multi-word names, hyphenated/apostrophe names, or
+ * anything that recurs. One-off capitalised words are sentence noise, not names.
+ */
+export function latinCandidates(text, cap = 120) {
+  const counts = new Map();
+  for (const m of String(text || "").matchAll(LATIN_NAME)) {
+    const w = m[0].trim().replace(/\s+/g, " ");
+    if (!isLatinText(w) || w.length < 3) continue;
+    if (STOPWORDS.has(w.toLowerCase())) continue;
+    counts.set(w, (counts.get(w) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .filter(([w, c]) => c >= 2 || /[-'’]/.test(w) || w.split(" ").length > 1)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, cap)
+    .map(([w]) => w);
+}
 
 /** Latin terms are canonical as-is; others need a model/user decision. */
 export function canonicalFor(source) {
   if (isLatinText(source)) return { canonical: source, auto: true };
   return { canonical: null, auto: false };
 }
+
+export { STOPWORDS };
 
 /**
  * Bounded model call: ask how IT translated the proper names in this passage,

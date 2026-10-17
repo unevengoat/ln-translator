@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+process.env.AI_MIN_INTERVAL_MS = "0";
 import { chunkNovel, joinChunks, normalizeText } from "../src/chunker.js";
 import { parseGlossary, protectTerms, glossaryPromptLines } from "../src/glossary.js";
 import { buildSystemPrompt, buildUserMessage } from "../src/prompt.js";

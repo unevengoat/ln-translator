@@ -41,7 +41,8 @@ export async function translateAiChunk(chunk, { source = "auto", target = "en", 
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`AI API [${cfg.provider}/${cfg.model}] HTTP ${res.status}: ${body.slice(0, 300)}`);
+    const ra = res.headers?.get?.("retry-after");
+    throw new Error(`AI API [${cfg.provider}/${cfg.model}] HTTP ${res.status}${ra ? ` retry-after=${ra}` : ""}: ${body.slice(0, 300)}`);
   }
   const data = await res.json();
   // Some providers (reasoning models, Pollinations) put the answer in
