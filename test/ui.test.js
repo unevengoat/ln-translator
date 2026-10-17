@@ -35,7 +35,7 @@ describe("front-end assets", () => {
       assert.ok(html.includes(ref), `index.html should reference ${ref}`);
       assert.ok(existsSync(path.join(PUBLIC, ref.replace(/^\//, ""))), `${ref} must exist`);
     }
-    for (const id of ["view-library", "view-reader", "view-add", "view-activity", "view-about"]) {
+    for (const id of ["view-browse", "view-reader", "view-add", "view-activity", "view-about", "view-search", "view-mylist"]) {
       assert.ok(html.includes(`id="${id}"`), `index.html should contain ${id}`);
     }
   });

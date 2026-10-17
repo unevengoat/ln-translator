@@ -2,7 +2,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-export const SUPPORTED_IN = [".txt", ".md", ".markdown", ".html", ".htm", ".epub", ".pdf"];
+export const SUPPORTED_IN = [".txt", ".md", ".markdown", ".html", ".htm", ".epub", ".pdf", ".docx", ".odt", ".rtf", ".fb2", ".zip"];
 export const SUPPORTED_OUT = [".txt", ".md", ".html"];
 
 function htmlToText(html) {
@@ -26,14 +26,95 @@ export async function readInput(filePath) {
   return parseBuffer(path.basename(filePath), await readFile(filePath));
 }
 
-/** Parse an uploaded file's bytes into novel text (.txt/.md/.html/.epub/.pdf). */
+/** Parse an uploaded file's bytes into novel text. Supports the formats people
+ *  actually have novels in: txt, md, html, epub, pdf, docx, odt, rtf, fb2 and
+ *  zip archives of any of those. */
 export async function parseBuffer(name, buffer) {
   const ext = path.extname(name).toLowerCase();
   if (ext === ".epub") return epubToText(buffer);
   if (ext === ".pdf") return pdfToText(buffer);
+  if (ext === ".docx" || ext === ".odt") return officeToText(buffer, ext);
+  if (ext === ".zip") return zipToText(buffer, name);
   const raw = buffer.toString("utf8");
+  if (ext === ".rtf") return rtfToText(raw);
+  if (ext === ".fb2") return fb2ToText(raw);
   if (ext === ".html" || ext === ".htm") return htmlToText(raw);
   return raw.replace(/\r\n?/g, "\n").trim() + "\n";
+}
+
+const decodeEntities = (s) =>
+  String(s)
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&amp;/g, "&");
+
+/** .docx / .odt — both are zip archives with an XML document inside. */
+async function officeToText(buffer, ext) {
+  let JSZip;
+  try { ({ default: JSZip } = await import("jszip")); }
+  catch { throw new Error("Office support needs 'jszip' — run: npm install"); }
+  const zip = await JSZip.loadAsync(buffer);
+  const target = ext === ".docx" ? "word/document.xml" : "content.xml";
+  const entry = zip.file(target) || Object.values(zip.files).find((f) => f.name.endsWith(target.split("/").pop() || target));
+  if (!entry) throw new Error(`Could not find ${target} inside the file.`);
+  let xml = await entry.async("string");
+  // paragraph / line breaks → text breaks, then strip every tag
+  xml = xml
+    .replace(/<w:br[^>]*\/>/g, "\n")
+    .replace(/<\/w:p>/g, "\n\n")
+    .replace(/<text:p[^>]*>/g, "")
+    .replace(/<\/text:p>/g, "\n\n")
+    .replace(/<text:line-break[^>]*\/>/g, "\n")
+    .replace(/<\/text:h>/g, "\n\n")
+    .replace(/<[^>]+>/g, "");
+  return decodeEntities(xml).replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim() + "\n";
+}
+
+/** .rtf — strip control words/groups into plain text. */
+function rtfToText(raw) {
+  let s = String(raw);
+  s = s.replace(/\{\\fonttbl[\s\S]*?\}\}/g, "").replace(/\{\\colortbl[\s\S]*?\}/g, "").replace(/\{\\stylesheet[\s\S]*?\}\}/g, "");
+  s = s.replace(/\\'([0-9a-f]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
+  s = s.replace(/\\(par|line|sect|page)\b\s?/gi, "\n\n").replace(/\\tab\b\s?/gi, "\t");
+  s = s.replace(/\\u(-?\d+)\s?\??/g, (_, d) => String.fromCodePoint(((Number(d) + 65536) % 65536)));
+  s = s.replace(/\\[a-z]+(-?\d+)?\s?/gi, "").replace(/[{}]/g, "");
+  return s.replace(/\r\n?/g, "\n").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim() + "\n";
+}
+
+/** .fb2 — FictionBook XML. */
+function fb2ToText(raw) {
+  let s = String(raw);
+  const body = s.match(/<body[\s\S]*?<\/body>/i);
+  s = body ? body[0] : s;
+  s = s
+    .replace(/<title>\s*<p>([\s\S]*?)<\/p>\s*<\/title>/gi, "\n\n$1\n\n")
+    .replace(/<empty-line\s*\/>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<p[^>]*>/gi, "")
+    .replace(/<[^>]+>/g, "");
+  return decodeEntities(s).replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim() + "\n";
+}
+
+/** .zip — a bundle of chapters/files: parse each entry and keep them in order. */
+async function zipToText(buffer, name) {
+  let JSZip;
+  try { ({ default: JSZip } = await import("jszip")); }
+  catch { throw new Error("ZIP support needs 'jszip' — run: npm install"); }
+  const zip = await JSZip.loadAsync(buffer);
+  const entries = Object.values(zip.files)
+    .filter((f) => !f.dir && SUPPORTED_IN.includes(path.extname(f.name).toLowerCase()) && path.extname(f.name).toLowerCase() !== ".zip")
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+  if (!entries.length) throw new Error("No readable files inside the zip (txt, md, html, epub, pdf, docx, rtf, fb2).");
+  const parts = [];
+  for (let i = 0; i < entries.length; i++) {
+    const f = entries[i];
+    const text = await parseBuffer(f.name, Buffer.from(await f.async("uint8array")));
+    const label = path.basename(f.name).replace(/\.[a-z0-9]+$/i, "");
+    const looksLikeChapter = /^\s*(chapter|ch\.?|第\s*\d+\s*[章話话節节回]|vol(ume)?\.?\s*\d+)/i.test(label);
+    parts.push(`${looksLikeChapter ? "" : `Chapter ${i + 1} — `}${label}\n\n${text.trim()}`);
+  }
+  return parts.join("\n\n");
 }
 
 /**

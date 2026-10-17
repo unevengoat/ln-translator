@@ -3,167 +3,138 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LN Translator — Light Novel &amp; Web Novel Library</title>
-<meta name="description" content="Translate and read light novels / web novels with consistent names across every chapter and volume. Free, shared library.">
-<meta property="og:title" content="LN Translator — Light Novel Library">
-<meta property="og:description" content="Shared, consistent light novel translations. Add a chapter or a whole volume once; everyone can read it in any language.">
-<meta property="og:type" content="website">
+<title>LN Translator — your novel library</title>
+<meta name="description" content="A shared light novel / web novel library with per-profile reading, reading levels and instant translations.">
 <link rel="manifest" href="/manifest.webmanifest">
-<meta name="theme-color" content="#b3541e">
+<meta name="theme-color" content="#0b0b0d">
 <link rel="stylesheet" href="/styles.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>📖</text></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23e50914'/><text x='16' y='24' font-size='19' text-anchor='middle' fill='white'>N</text></svg>">
 </head>
 <body>
-<header>
-  <h1><a href="#/">LN Translator</a></h1>
-  <p>Translate &amp; keep light novels / web novels — volumes, chapters, consistent names, any language.</p>
-  <nav>
-    <button data-route="#/">Library</button>
-    <button data-route="#/add">Add</button>
-    <button data-route="#/activity">Activity</button>
-    <button data-route="#/quick">Quick translate</button>
-    <button data-route="#/about">About</button>
-  </nav>
-</header>
 
-<main>
-  <!-- ---------------------------------------------------------- library -->
-  <section id="view-library" class="view">
-    <div class="card">
+<!-- ============================ who's reading (profile gate) ============= -->
+<div id="gate" class="gate">
+  <div class="gate-inner">
+    <h1 class="logo-big">LN&nbsp;TRANSLATOR</h1>
+    <p class="gate-q">Who's reading?</p>
+    <div id="gateProfiles" class="gate-grid"></div>
+    <div class="gate-actions">
+      <button id="addProfileBtn" class="ghost">＋ Add profile</button>
+      <button id="manageProfilesBtn" class="ghost">Manage</button>
+    </div>
+    <div id="gateMsg" class="hint"></div>
+    <p class="hint gate-note">The library is shared with everyone here. Your reading progress, My List and look are private to your profile.</p>
+  </div>
+</div>
+
+<!-- ============================== app shell ============================== -->
+<div id="appShell" class="shell hidden">
+  <header class="topbar">
+    <a href="#/" class="logo">LN<span>Translator</span></a>
+    <nav id="mainNav">
+      <a href="#/browse" data-nav="browse">Browse</a>
+      <a href="#/mylist" data-nav="mylist">My List</a>
+      <a href="#/search" data-nav="search">Search</a>
+      <a href="#/add" data-nav="add">Add</a>
+      <a href="#/activity" data-nav="activity">Activity</a>
+      <a href="#/about" data-nav="about">About</a>
+    </nav>
+    <span class="spacer"></span>
+    <button id="whoami" class="avatar-btn" title="Switch profile">🦊</button>
+  </header>
+
+  <div id="profileMenu" class="menu hidden">
+    <div class="menu-head"><span id="menuAvatar">🦊</span><strong id="menuName">profile</strong></div>
+    <button data-menu="edit">Edit profile &amp; PIN</button>
+    <button data-menu="switch">Switch profile</button>
+    <button data-menu="signout">Sign out</button>
+  </div>
+
+  <main>
+    <!-- ------------------------------------------------------------ browse -->
+    <section id="view-browse" class="view">
+      <div id="hero" class="hero"></div>
+      <div id="browseRows"></div>
+    </section>
+
+    <!-- ------------------------------------------------------------ search -->
+    <section id="view-search" class="view">
       <div class="row">
-        <label class="grow">Search <input id="search" placeholder="title, author, language…"></label>
+        <label class="grow">Search the library <input id="search" placeholder="title, author, language…"></label>
         <button id="searchGo" type="button">Search</button>
-        <button id="gotoAdd" type="button">＋ Add chapters / volumes</button>
       </div>
-      <div id="globalStats" class="hint"></div>
-      <div id="continueWrap" class="hidden">
-        <h2>Continue reading</h2>
-        <div id="continueList" class="chips"></div>
-      </div>
-      <h2>Stories</h2>
-      <div id="works" class="works"></div>
-    </div>
-  </section>
+      <div id="searchResults" class="grid"></div>
+    </section>
 
-  <!-- ------------------------------------------------------------- add -->
-  <section id="view-add" class="view">
-    <div class="card">
-      <h2>Add chapters or a whole volume <small class="hint">— saved once, translated once, reused forever</small></h2>
-      <div class="row">
-        <label>Story title <input id="title" placeholder="e.g. Mushoku Tensei"></label>
-        <label>Author <input id="author" placeholder="optional"></label>
-        <label>Source language <select id="sourceLang"></select></label>
-      </div>
-      <div class="row">
-        <label>Volume (optional) <input id="volume" placeholder="e.g. Volume 1 / 第1巻"></label>
-        <label>Chapter title (optional) <input id="chapterTitle" placeholder="auto from markers"></label>
-        <label>Source URL <input id="sourceUrl" placeholder="optional — links re-uploads to the same story"></label>
-      </div>
-      <div class="row">
-        <label class="file">📄 Load file (.txt/.md/.html/.epub/.pdf) <input id="uploadFile" type="file" accept=".txt,.md,.markdown,.html,.htm,.epub,.pdf" hidden></label>
-        <label class="engine"><input type="checkbox" id="autoSplit" checked> Auto-split volumes &amp; chapters</label>
-        <label class="engine"><input type="checkbox" id="autoDetect" checked> Auto-detect language</label>
-        <span id="uploadStats" class="hint"></span>
-      </div>
-      <label>Text
-        <textarea id="uploadText" rows="12" placeholder="Paste a chapter, or a whole volume. Markers like &quot;Volume 1&quot;, &quot;Chapter 2&quot;, &quot;第1巻&quot;, &quot;第2話&quot; are detected automatically."></textarea>
-      </label>
-      <div class="row">
-        <button id="previewSplit" type="button">Preview split</button>
-        <span class="hint">Translate into:</span>
-        <span id="autoLangs" class="chips"></span>
-      </div>
-      <div class="row">
-        <span class="hint">Reading level:</span>
-        <span id="autoLevels" class="chips"></span>
-      </div>
-      <div id="splitPreview" class="hint"></div>
-      <div id="addHint" class="hint"></div>
-      <div class="row">
-        <button id="saveTranslate" class="primary">Save &amp; translate</button>
-        <button id="saveOnly" type="button">Save only</button>
-      </div>
-      <div id="uploadResult" class="hint"></div>
-      <details>
-        <summary>Story style (applies to every chapter of this story)</summary>
-        <div class="row">
-          <label><input type="checkbox" id="setHonorifics" checked> Keep honorifics (-san, -sama, oppa…)</label>
-          <label>Register <select id="setFormality"><option value="match">Match original</option><option value="formal">Formal</option><option value="casual">Casual</option></select></label>
-        </div>
-        <label>Translator notes (characters, vibe, do-not-translate rules)
-          <textarea id="setNotes" rows="2" placeholder="e.g. Kirito is cold and terse; keep skill names in English."></textarea>
-        </label>
-      </details>
-    </div>
-  </section>
+    <!-- ------------------------------------------------------------ my list -->
+    <section id="view-mylist" class="view">
+      <h2>My List <small class="hint">— saved to your profile</small></h2>
+      <div id="myListGrid" class="grid"></div>
+    </section>
 
-  <!-- ---------------------------------------------------------- reader -->
-  <section id="view-reader" class="view">
-    <div class="card">
-      <div class="row">
-        <button id="backToLibrary" type="button">← Library</button>
-        <h2 id="readerTitle"></h2>
-        <button id="addToStory" type="button">＋ Add to this story</button>
-        <button id="storySettingsBtn" type="button">Story settings</button>
+    <!-- ------------------------------------------------------------ reader -->
+    <section id="view-reader" class="view">
+      <div class="reader-top">
+        <button id="backToBrowse" class="ghost" type="button">← Browse</button>
+        <div class="reader-titles"><h2 id="readerTitle"></h2><div id="readerSub" class="hint"></div></div>
+        <button id="addToStory" class="ghost" type="button">＋ Add chapters</button>
+        <button id="storySettingsBtn" class="ghost" type="button">Story settings</button>
+        <button id="myListBtn" class="ghost" type="button">＋ My List</button>
       </div>
-      <div class="row">
-        <button id="prevChapter" type="button">‹ Prev</button>
+      <div class="reader-controls">
+        <button id="prevChapter" class="ghost" type="button">‹</button>
         <label id="volumeWrap" class="hidden">Volume <select id="volumeSelect"></select></label>
         <label>Chapter <select id="chapterSelect"></select></label>
-        <button id="nextChapter" type="button">Next ›</button>
-      </div>
-      <div class="row">
+        <button id="nextChapter" class="ghost" type="button">›</button>
         <label>Language <select id="langSelect"></select></label>
-        <label>Reading level <select id="difficultySelect">
-          <option value="easy">Easy — simple words &amp; short sentences</option>
-          <option value="medium" selected>Medium — natural novel style</option>
-          <option value="hard">Hard — advanced vocabulary &amp; grammar</option>
+        <label>Level <select id="difficultySelect">
+          <option value="easy">Easy</option>
+          <option value="medium" selected>Medium</option>
+          <option value="hard">Hard</option>
         </select></label>
         <button id="translateBtn" type="button">Translate / ensure</button>
-        <button id="translateAllBtn" type="button">Translate whole story…</button>
+        <button id="translateAllBtn" class="ghost" type="button">Whole story…</button>
       </div>
-      <div class="row">
-        <button id="showOriginal" type="button">Original</button>
-        <button id="splitView" type="button">Side by side</button>
-        <button id="copyChapter" type="button">Copy</button>
-        <button id="dlChapter" type="button">Download</button>
-        <button id="shareChapter" type="button">Share link</button>
+      <div class="reader-controls">
+        <button id="showOriginal" class="ghost" type="button">Original</button>
+        <button id="splitView" class="ghost" type="button">Side by side</button>
+        <button id="copyChapter" class="ghost" type="button">Copy</button>
+        <button id="dlChapter" class="ghost" type="button">Download</button>
+        <button id="shareChapter" class="ghost" type="button">Share</button>
+        <button id="readerLookBtn" class="ghost" type="button">Look ▾</button>
       </div>
-      <details id="lookDetails">
-        <summary>Reading look — theme, font, size, spacing</summary>
-        <div class="row">
-          <label>Theme <select id="theme">
-            <option value="auto">Auto (system)</option>
-            <option value="light">Light</option>
-            <option value="sepia">Sepia</option>
-            <option value="parchment">Parchment</option>
-            <option value="solarized">Solarized</option>
-            <option value="rose">Rose</option>
-            <option value="dark">Dark</option>
-            <option value="slate">Slate</option>
-            <option value="forest">Forest</option>
-            <option value="night">Night (black)</option>
-          </select></label>
-          <label>Font <select id="fontFamily">
-            <option value="serif">Serif (book)</option>
-            <option value="sans">Sans (clean)</option>
-            <option value="dyslexic">Dyslexia-friendly</option>
-            <option value="mono">Monospace</option>
-          </select></label>
-          <label>Size <input id="fontSize" type="range" min="14" max="30" step="1" value="18"></label>
-          <label>Line spacing <select id="lineHeight">
-            <option value="1.4">Tight</option>
-            <option value="1.7" selected>Normal</option>
-            <option value="2.1">Wide</option>
-          </select></label>
-          <label>Width <select id="readWidth">
-            <option value="34rem">Narrow</option>
-            <option value="46rem" selected>Medium</option>
-            <option value="62rem">Wide</option>
-          </select></label>
-          <label class="chip"><input type="checkbox" id="justifyText"> Justify</label>
-        </div>
-      </details>
+      <div id="lookPanel" class="look-panel hidden">
+        <label>Theme <select id="theme">
+          <option value="auto">Auto</option><option value="light">Light</option><option value="sepia">Sepia</option>
+          <option value="parchment">Parchment</option><option value="solarized">Solarized</option><option value="rose">Rose</option>
+          <option value="dark">Dark</option><option value="night">Night</option><option value="slate">Slate</option>
+          <option value="forest">Forest</option><option value="ink">Ink</option>
+        </select></label>
+        <label>Font <select id="fontFamily">
+          <option value="serif">Book serif</option>
+          <option value="literary">Literary</option>
+          <option value="sans">Clean sans</option>
+          <option value="humanist">Humanist</option>
+          <option value="dyslexic">Dyslexia-friendly</option>
+          <option value="mono">Monospace</option>
+        </select></label>
+        <label>Size <input id="fontSize" type="range" min="14" max="32" step="1" value="18"></label>
+        <label>Line spacing <select id="lineHeight">
+          <option value="1.4">Tight</option><option value="1.7" selected>Normal</option><option value="2.1">Wide</option><option value="2.5">Airy</option>
+        </select></label>
+        <label>Width <select id="readWidth">
+          <option value="32rem">Narrow</option><option value="46rem" selected>Medium</option><option value="62rem">Wide</option><option value="80rem">Full</option>
+        </select></label>
+        <label>Page background <select id="pageBg">
+          <option value="plain">Plain</option><option value="paper">Paper</option><option value="grain">Grain</option><option value="vignette">Vignette</option>
+        </select></label>
+        <label>Letter spacing <select id="letterSpacing">
+          <option value="0">Normal</option><option value="0.01em">Slightly wide</option><option value="0.03em">Wide</option>
+        </select></label>
+        <label class="chip"><input type="checkbox" id="justifyText"> Justify</label>
+        <span class="spacer"></span>
+        <span id="lookSaved" class="hint"></span>
+      </div>
       <div id="readerMeta" class="hint"></div>
       <div class="progress"><span id="progressBar"></span></div>
       <div id="warnBox" class="warns hidden"></div>
@@ -171,91 +142,124 @@
         <article id="readerBody" class="reader"></article>
         <article id="readerBody2" class="reader hidden"></article>
       </div>
-      <div class="bottom-nav">
-        <button id="prevChapterBottom" type="button">‹ Previous chapter</button>
-        <button id="nextChapterBottom" type="button">Next chapter ›</button>
+      <div class="reader-foot">
+        <button id="prevChapterBottom" class="ghost" type="button">‹ Previous chapter</button>
+        <button id="markRead" class="ghost" type="button">Mark finished</button>
+        <button id="nextChapterBottom" class="ghost" type="button">Next chapter ›</button>
       </div>
-      <div class="row">
-        <span class="hint">Shortcuts: ← / → chapters · t translate · o original · s side-by-side · 1/2/3 reading level</span>
-      </div>
-    </div>
+      <div class="hint">Shortcuts: ← / → chapters · t translate · o original · s side-by-side · 1/2/3 level</div>
 
-    <div class="card">
-      <h2>Terms <small class="hint">— the story's glossary; corrections rewrite every chapter instantly</small></h2>
-      <div class="row">
-        <label class="grow">Find term <input id="termSearch" placeholder="type to filter the list…"></label>
-        <span id="termCount" class="hint"></span>
+      <div class="card">
+        <h2>Terms <small class="hint">— shared glossary; corrections rewrite every level instantly</small></h2>
+        <div class="row">
+          <label class="grow">Find term <input id="termSearch" placeholder="type to filter…"></label>
+          <span id="termCount" class="hint"></span>
+        </div>
+        <div id="terms" class="terms"></div>
+        <div class="row">
+          <label>Source term <input id="termSource" placeholder="キリト"></label>
+          <label>Use this <input id="termCanonical" placeholder="Kirito"></label>
+          <button id="saveTerm" type="button">Save term (updates all levels)</button>
+        </div>
+        <div class="row">
+          <button id="exportGloss" class="ghost" type="button">Export glossary</button>
+          <label class="file ghost">📄 Import glossary <input id="importGlossFile" type="file" accept=".csv,.json,.txt" hidden></label>
+          <button id="acceptSuggestions" class="ghost" type="button">Accept suggestions</button>
+          <button id="cleanTerms" class="ghost" type="button">Clean noisy terms</button>
+        </div>
+        <div id="termResult" class="hint"></div>
+        <details><summary>Suggestions from this story</summary><div id="termSuggest" class="hint"></div></details>
       </div>
-      <div id="terms" class="terms"></div>
-      <div class="row">
-        <label>Source term <input id="termSource" placeholder="キリト"></label>
-        <label>Use this <input id="termCanonical" placeholder="Kirito"></label>
-        <button id="saveTerm" type="button">Save term (updates all chapters)</button>
-      </div>
-      <div class="row">
-        <button id="exportGloss" type="button">Export glossary</button>
-        <label class="file">📄 Import glossary <input id="importGlossFile" type="file" accept=".csv,.json,.txt" hidden></label>
-        <button id="acceptSuggestions" type="button">Accept suggestions</button>
-        <button id="cleanTerms" type="button">Clean noisy terms</button>
-      </div>
-      <label>Paste glossary (CSV <code>source,canonical</code> or <code>a=b</code> per line)
-        <textarea id="glossImport" rows="2" placeholder="キリト,Kirito&#10;アスナ,Asuna"></textarea>
-      </label>
-      <button id="importGlossPaste" type="button">Import pasted glossary</button>
-      <div id="termResult" class="hint"></div>
-      <details open><summary>Suggestions from this story</summary><div id="termSuggest" class="hint"></div></details>
-    </div>
-  </section>
+    </section>
 
-  <!-- -------------------------------------------------------- activity -->
-  <section id="view-activity" class="view">
-    <div class="card">
-      <h2>Recent activity <small class="hint">— everything that happens in the shared library</small></h2>
-      <div id="activityFeed" class="feed"></div>
-    </div>
-  </section>
-
-  <!-- ----------------------------------------------------- quick translate -->
-  <section id="view-quick" class="view">
-    <div class="card">
-      <h2>Quick translate <small class="hint">— nothing saved, just text in / text out (Groq → Gemini)</small></h2>
-      <div class="row">
-        <label>Source <select id="source"></select></label>
-        <button id="swap" type="button">⇄</button>
-        <label>Target <select id="target"></select></label>
+    <!-- -------------------------------------------------------------- add -->
+    <section id="view-add" class="view">
+      <div class="card">
+        <h2>Add chapters or a whole volume <small class="hint">— saved once, translated once, reused forever</small></h2>
+        <div class="row">
+          <label>Story title <input id="title" placeholder="e.g. Mushoku Tensei"></label>
+          <label>Author <input id="author" placeholder="optional"></label>
+          <label>Source language <select id="sourceLang"></select></label>
+        </div>
+        <div class="row">
+          <label>Volume (optional) <input id="volume" placeholder="Volume 1 / 第1巻"></label>
+          <label>Chapter title (optional) <input id="chapterTitle" placeholder="auto from markers"></label>
+          <label>Source URL <input id="sourceUrl" placeholder="links re-uploads to the same story"></label>
+        </div>
+        <div class="row">
+          <label class="file ghost">📄 Load file (.txt .md .html .epub .pdf .docx .rtf .fb2 .zip) <input id="uploadFile" type="file" accept=".txt,.md,.markdown,.html,.htm,.epub,.pdf,.docx,.rtf,.fb2,.zip" hidden></label>
+          <label class="chip"><input type="checkbox" id="autoSplit" checked> Auto-split volumes &amp; chapters</label>
+          <label class="chip"><input type="checkbox" id="autoDetect" checked> Auto-detect language</label>
+          <span id="uploadStats" class="hint"></span>
+        </div>
+        <label>Text
+          <textarea id="uploadText" rows="12" placeholder="Paste a chapter, or a whole volume. Markers like &quot;Volume 1&quot;, &quot;Chapter 2&quot;, &quot;第1巻&quot;, &quot;第2話&quot; are detected automatically."></textarea>
+        </label>
+        <div class="row">
+          <button id="previewSplit" class="ghost" type="button">Preview split</button>
+          <span class="hint">Translate into:</span><span id="autoLangs" class="chips"></span>
+        </div>
+        <div class="row"><span class="hint">Reading level:</span><span id="autoLevels" class="chips"></span></div>
+        <div id="splitPreview" class="hint"></div>
+        <div id="addHint" class="hint"></div>
+        <div class="row">
+          <button id="saveTranslate" class="primary">Save &amp; translate</button>
+          <button id="saveOnly" class="ghost" type="button">Save only</button>
+        </div>
+        <div id="uploadResult" class="hint"></div>
+        <details>
+          <summary>Story style (applies to every chapter of this story)</summary>
+          <div class="row">
+            <label class="chip"><input type="checkbox" id="setHonorifics" checked> Keep honorifics</label>
+            <label>Register <select id="setFormality"><option value="match">Match original</option><option value="formal">Formal</option><option value="casual">Casual</option></select></label>
+          </div>
+          <label>Translator notes <textarea id="setNotes" rows="2" placeholder="e.g. Kirito is cold and terse; keep skill names in English."></textarea></label>
+        </details>
       </div>
-      <label>Text <textarea id="input" rows="8"></textarea></label>
-      <button id="go">Translate</button>
-      <div id="progress" class="hint"></div>
-      <label>Result <textarea id="output" rows="10" readonly></textarea></label>
-    </div>
-  </section>
+    </section>
 
-  <!-- ----------------------------------------------------------- about -->
-  <section id="view-about" class="view">
-    <div class="card">
-      <h2>About this library</h2>
-      <div id="healthBox" class="hint"></div>
-      <div id="tokenBox" class="hint"></div>
-      <h2>Storage &amp; updates</h2>
-      <p class="hint">The library lives outside the app container (durable storage), so redeploys and idle sleep never lose data.
-        Saves are written immediately. If you edit storage by hand, this instance picks it up within ~2 minutes, or press reload.</p>
-      <div class="row">
-        <button id="reloadStore" type="button">Reload library from storage</button>
-        <button id="exportAll" type="button">Export everything (JSON)</button>
-        <label class="file">📄 Import backup <input id="importAllFile" type="file" accept=".json" hidden></label>
+    <!-- --------------------------------------------------------- activity -->
+    <section id="view-activity" class="view">
+      <div class="card"><h2>Recent activity</h2><div id="activityFeed" class="feed"></div></div>
+    </section>
+
+    <!-- ------------------------------------------------------------ about -->
+    <section id="view-about" class="view">
+      <div class="card">
+        <h2>About this library</h2>
+        <div id="healthBox" class="hint"></div>
+        <div id="tokenBox" class="hint"></div>
+        <div id="poolBox" class="hint"></div>
+        <h2>Storage, backups &amp; updates</h2>
+        <p class="hint">The library lives outside the app container, so redeploys and idle sleep never lose data. Saves write immediately; if you edit storage by hand this instance picks it up within ~2 minutes, or press reload.</p>
+        <div class="row">
+          <button id="reloadStore" class="ghost" type="button">Reload library from storage</button>
+          <button id="exportAll" class="ghost" type="button">Export everything (JSON)</button>
+          <label class="file ghost">📄 Import backup <input id="importAllFile" type="file" accept=".json" hidden></label>
+        </div>
+        <div id="backupResult" class="hint"></div>
+        <h2>API</h2>
+        <p class="hint">Open <a href="/api" target="_blank">/api</a> for the endpoint list.</p>
       </div>
-      <div id="backupResult" class="hint"></div>
-      <h2>API</h2>
-      <p class="hint">Open <a href="/api" target="_blank">/api</a> for the endpoint list. Useful for other clients and the CLI.</p>
-    </div>
-  </section>
-</main>
+    </section>
+  </main>
+  <footer><small id="footerInfo"></small></footer>
+</div>
 
-<footer>
-  <small id="footerInfo"></small>
-  <div class="toasts" id="toasts"></div>
-</footer>
+<!-- modal: PIN / new profile / edit profile -->
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <h2 id="modalTitle">Enter PIN</h2>
+    <div id="modalBody"></div>
+    <div id="modalMsg" class="hint"></div>
+    <div class="row modal-actions">
+      <button id="modalOk" type="button">OK</button>
+      <button id="modalCancel" class="ghost" type="button">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
 <script src="/app.js"></script>
 </body>
 </html>

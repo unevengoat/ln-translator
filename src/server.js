@@ -16,6 +16,10 @@ import {
   DIFFICULTIES, DEFAULT_DIFFICULTY, cleanTranslationArtifacts,
 } from "./library.js";
 import { normalizeDifficulty } from "./qa.js";
+import {
+  listProfiles, createProfile, loginProfile, logoutProfile, authProfile, requireProfile,
+  updateProfile, deleteProfile, getState, patchState,
+} from "./profiles.js";
 import { PRIMARY, BACKUP, poolStatus, configuredProviders } from "./engines/models.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -169,6 +173,9 @@ const server = createServer(async (req, res) => {
         "POST /api/works/:id/translate-all", "GET /api/works/:id/terms?lang=", "POST /api/works/:id/terms",
         "GET /api/works/:id/glossary?lang=&format=csv|json", "POST /api/works/:id/glossary",
         "GET /api/export", "POST /api/import", "POST /api/translate",
+        "GET /api/profiles", "POST /api/profiles", "POST /api/profiles/:id/login",
+        "GET /api/profiles/:id/state", "POST /api/profiles/:id/state", "PATCH /api/profiles/:id", "DELETE /api/profiles/:id",
+        "GET /api/me", "POST /api/logout",
       ],
     });
     if (method === "GET" && pathname === "/api/health") {
@@ -222,6 +229,49 @@ const server = createServer(async (req, res) => {
         chain: b.chain,
       });
       return json(res, 200, result);
+    }
+
+    /* ---- profiles (shared library, private reading state) ---- */
+    if (pathname === "/api/profiles" && method === "GET") return json(res, 200, await listProfiles(store));
+    if (pathname === "/api/profiles" && method === "POST") {
+      const b = await readJson(req);
+      const profile = await createProfile(store, { name: b.name, avatar: b.avatar, color: b.color, pin: b.pin });
+      const session = await loginProfile(store, profile.id, b.pin);
+      return json(res, 200, { profile, token: session.token });
+    }
+    if (pathname === "/api/me" && method === "GET") {
+      const me = await authProfile(store, req.headers["x-profile-token"]);
+      return json(res, 200, { profile: me });
+    }
+    if (pathname === "/api/logout" && method === "POST") {
+      await logoutProfile(store, req.headers["x-profile-token"]);
+      return json(res, 200, { ok: true });
+    }
+    if (seg[0] === "api" && seg[1] === "profiles" && seg[2]) {
+      const id = seg[2];
+      const token = req.headers["x-profile-token"];
+      if (seg.length === 4 && seg[3] === "login" && method === "POST") {
+        const b = await readJson(req);
+        return json(res, 200, await loginProfile(store, id, b.pin));
+      }
+      if (seg.length === 4 && seg[3] === "state" && method === "GET") {
+        await requireProfile(store, id, token);
+        return json(res, 200, await getState(store, id));
+      }
+      if (seg.length === 4 && seg[3] === "state" && method === "POST") {
+        await requireProfile(store, id, token);
+        const b = await readJson(req);
+        return json(res, 200, await patchState(store, id, b));
+      }
+      if (seg.length === 3 && method === "PATCH") {
+        await requireProfile(store, id, token);
+        const b = await readJson(req);
+        return json(res, 200, await updateProfile(store, id, b));
+      }
+      if (seg.length === 3 && method === "DELETE") {
+        await requireProfile(store, id, token);
+        return json(res, 200, await deleteProfile(store, id));
+      }
     }
 
     /* ---- library ---- */

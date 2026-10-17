@@ -177,6 +177,7 @@ export class Store {
     this.termsCache = new Map();
     this.tmCache = new Map();
     this.pending = new Map(); // path -> () => string
+    this.rawCache = new Map();
     this.timer = null;
     this.queue = Promise.resolve();
   }
@@ -220,6 +221,7 @@ export class Store {
     this.db = null;
     this.termsCache.clear();
     this.tmCache.clear();
+    this.rawCache.clear();
     return this.load();
   }
 
@@ -316,6 +318,22 @@ export class Store {
     return tm;
   }
 
+  /* ---- raw JSON files (profiles, per-profile state, anything else) ---- */
+  async readRaw(path) {
+    if (this.rawCache.has(path)) return this.rawCache.get(path);
+    const raw = await this.backend.getText(path);
+    if (raw == null) return null;
+    this.rawCache.set(path, raw);
+    return raw;
+  }
+
+  writeRaw(path, obj) {
+    const body = typeof obj === "string" ? obj : JSON.stringify(obj);
+    this.rawCache.set(path, body);
+    this._mark(path, () => body);
+    return obj;
+  }
+
   /* ---- backup / migration ---- */
   async exportAll() {
     await this.load();
@@ -330,7 +348,20 @@ export class Store {
         for (const d of ["medium", "easy", "hard"]) tm[`${w.id}|${lang}|${d}`] = await this.loadTm(w.id, lang, d).catch(() => ({}));
       }
     }
-    return { format: "ln-translator-export", version: 1, exportedAt: Date.now(), backend: this.backendName, db: this.db, texts, terms, tm };
+    // profiles + their private reading state (so a backup is complete)
+    let profiles = null;
+    const states = {};
+    try {
+      const raw = await this.readRaw("profiles.json");
+      if (raw) {
+        profiles = JSON.parse(raw);
+        for (const p of profiles.profiles || []) {
+          const s = await this.readRaw(`profiles/${p.id}.json`).catch(() => null);
+          if (s) states[p.id] = JSON.parse(s);
+        }
+      }
+    } catch { /* ignore */ }
+    return { format: "ln-translator-export", version: 2, exportedAt: Date.now(), backend: this.backendName, db: this.db, texts, terms, tm, profiles, states };
   }
 
   /** Merge an export into this store. Never deletes; newest record wins. */
@@ -382,6 +413,20 @@ export class Store {
       this.saveTm(workId, lang, current, difficulty);
     }
     await this.flush();
+    // profiles (merge by name, keep local PINs)
+    if (payload.profiles?.profiles?.length) {
+      const mine = JSON.parse((await this.readRaw("profiles.json")) || '{"profiles":[],"tokens":{}}');
+      const byName = new Map((mine.profiles || []).map((p) => [p.name.toLowerCase(), p]));
+      for (const p of payload.profiles.profiles) {
+        if (!byName.has(p.name.toLowerCase())) mine.profiles.push({ ...p, id: p.id });
+      }
+      this.writeRaw("profiles.json", mine);
+      for (const [id, st] of Object.entries(payload.states || {})) {
+        const existing = await this.readRaw(`profiles/${id}.json`).catch(() => null);
+        if (!existing) this.writeRaw(`profiles/${id}.json`, st);
+      }
+      await this.flush();
+    }
     return stats;
   }
 
