@@ -44,6 +44,67 @@ describe("chapter splitting (bulk upload)", () => {
   });
 });
 
+describe("volumes", () => {
+  it("detects volume and chapter markers together", () => {
+    const text = "Volume 1\nChapter 1\nStart.\n\nChapter 2\nMore.\n\nVolume 2\nChapter 1\nLater.";
+    const parts = splitChapters(text);
+    assert.equal(parts.length, 3);
+    assert.deepEqual(parts.map((p) => p.volume), ["Volume 1", "Volume 1", "Volume 2"]);
+    assert.deepEqual(parts.map((p) => p.title), ["Chapter 1", "Chapter 2", "Chapter 1"]);
+  });
+
+  it("detects CJK volume markers", () => {
+    const parts = splitChapters("第1巻\n第1話 始まり\n本文。\n\n第2話 続き\n本文。");
+    assert.equal(parts.length, 2);
+    assert.deepEqual(parts.map((p) => p.volume), ["第1巻", "第1巻"]);
+  });
+
+  it("does NOT treat the same chapter number in two volumes as a version", () => {
+    const t = async (chunk, o) => ({ text: `[${o.target}]${chunk}`, provider: "groq", model: "m" });
+    return (async () => {
+      const a = await ingestText(store, { title: "Two Vols", sourceLang: "en", volume: "Volume 1", chapterTitle: "Chapter 1", text: "Alpha one.", translate: t });
+      const b = await ingestText(store, { title: "Two Vols", sourceLang: "en", volume: "Volume 2", chapterTitle: "Chapter 1", text: "Beta one.", translate: t });
+      assert.equal(a.workId, b.workId);
+      assert.notEqual(a.chapterId, b.chapterId, "same index in a different volume is a different chapter");
+      assert.equal(b.version, undefined);
+      const work = await getWork(store, a.workId);
+      assert.equal(work.chapters.length, 2);
+      assert.deepEqual(work.volumes.map((v) => v.label), ["Volume 1", "Volume 2"]);
+    })();
+  });
+
+  it("auto-numbers chapters within their volume and sorts by volume then index", async () => {
+    const t = async (chunk, o) => ({ text: `[${o.target}]${chunk}`, provider: "groq", model: "m" });
+    const w = await ingestText(store, { title: "Vol Sort", sourceLang: "en", volume: "Volume 1", text: "first.", translate: t });
+    await ingestText(store, { title: "Vol Sort", sourceLang: "en", volume: "Volume 1", text: "second.", translate: t });
+    await ingestText(store, { title: "Vol Sort", sourceLang: "en", volume: "Volume 2", text: "third.", translate: t });
+    const work = await getWork(store, w.workId);
+    assert.deepEqual(work.chapters.map((c) => [c.volume, c.index]), [["Volume 1", 1], ["Volume 1", 2], ["Volume 2", 1]]);
+  });
+
+  it("bulk-ingests a whole volume in one call", async () => {
+    const t = async (chunk, o) => ({ text: `[${o.target}]${chunk}`, provider: "groq", model: "m" });
+    const r = await bulkIngest(store, {
+      title: "Bulk Volume", sourceLang: "ja", volume: "Volume 1",
+      text: "第1話 始まり\nキリト。\n\n第2話 続き\nアスナ。",
+      autoTranslateTo: ["sv"], translate: t,
+    });
+    assert.equal(r.chapters.length, 2);
+    assert.ok(r.chapters.every((c) => c.volume === "Volume 1"));
+    const work = await getWork(store, r.workId);
+    assert.equal(work.volumes[0].label, "Volume 1");
+    assert.equal(work.volumes[0].chapterCount, 2);
+    assert.ok(work.chapters.every((c) => c.translations.includes("sv")));
+  });
+
+  it("keeps volume labels without markers (defaultVolume)", async () => {
+    const t = async (chunk, o) => ({ text: `[${o.target}]${chunk}`, provider: "groq", model: "m" });
+    const r = await bulkIngest(store, { title: "Labeled Vol", sourceLang: "ja", volume: "Volume 3", text: "キリトは歩いた。", translate: t });
+    const work = await getWork(store, r.workId);
+    assert.equal(work.chapters[0].volume, "Volume 3");
+  });
+});
+
 describe("ingest, dedupe, versions", () => {
   it("creates a work, recognises duplicates, and keeps versions", async () => {
     const t = makeTranslator();

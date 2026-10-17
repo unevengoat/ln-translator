@@ -53,6 +53,9 @@ export class LocalBackend {
       return entries.filter((e) => e.isFile()).map((e) => `${prefix}${e.name}`);
     } catch { return []; }
   }
+  async revision(p) {
+    try { const st = await stat(this._p(p)); return `${st.mtimeMs}:${st.size}`; } catch { return null; }
+  }
   describe() { return `local disk (${this.dir})`; }
 }
 
@@ -62,6 +65,7 @@ export class R2Backend {
   getText(p) { return this.client.get(p); }
   putText(p, body) { return this.client.put(p, body, "application/octet-stream"); }
   listKeys(prefix) { return this.client.list(prefix); }
+  async revision(p) { const r = await this.client.head(p).catch(() => null); return r?.etag || null; }
   describe() { return `Cloudflare R2 (${this.client.bucket})`; }
 }
 
@@ -121,6 +125,34 @@ export class GitHubBackend {
 
   /** GitHub has no cheap listing here, so the store keeps index/texts.json. */
   async listKeys() { return []; }
+
+  /** Fresh (uncached) revision of a file = its blob sha. */
+  async revision(p) {
+    const res = await this.fetchFn(this._url(p) + `?ref=${this.branch}`, { headers: this._headers("application/vnd.github+json") });
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => ({}));
+    if (data.sha) this.shas.set(p, data.sha);
+    return data.sha || null;
+  }
+
+  /** Token/repo introspection for the health endpoint. */
+  async info() {
+    try {
+      const r = await this.fetchFn(`https://api.github.com/repos/${this.repo}`, { headers: this._headers("application/vnd.github+json") });
+      const scopes = r.headers?.get?.("x-oauth-scopes") || "";
+      let json = null;
+      try { json = await r.json(); } catch { /* ignore */ }
+      return {
+        provider: "github", repo: this.repo, branch: this.branch, ok: r.ok, status: r.status,
+        scopes, private: json?.private ?? null,
+        broadToken: /(^|,\s*)repo(,|$)/.test(scopes),
+        rateRemaining: r.headers?.get?.("x-ratelimit-remaining") || null,
+      };
+    } catch (e) {
+      return { provider: "github", repo: this.repo, ok: false, error: e.message };
+    }
+  }
+
   describe() { return `GitHub repo (${this.repo}@${this.branch})`; }
 }
 
@@ -158,7 +190,37 @@ export class Store {
     this.db = raw ? { ...emptyDb(), ...JSON.parse(raw) } : emptyDb();
     const idx = await this.backend.getText("index/texts.json").catch(() => null);
     if (idx) { try { this.hashes = new Set(JSON.parse(idx)); } catch { this.hashes = new Set(); } }
+    this.dbRev = await this._rev();
+    this.lastCheck = Date.now();
     return this.db;
+  }
+
+  async _rev(path = "db.json") {
+    try { return this.backend.revision ? await this.backend.revision(path) : null; } catch { return null; }
+  }
+
+  /**
+   * If storage was changed outside this process (a hand edit of db.json, or
+   * another instance), reload. Called on reads at most every `minMs`.
+   */
+  async maybeRefresh(minMs = 120000) {
+    if (!this.db) return false;
+    if (Date.now() - (this.lastCheck || 0) < minMs) return false;
+    this.lastCheck = Date.now();
+    try {
+      const rev = await this._rev();
+      if (rev && this.dbRev && rev !== this.dbRev) { await this.reload(); return true; }
+      if (rev) this.dbRev = rev;
+    } catch { /* ignore */ }
+    return false;
+  }
+
+  /** Drop in-memory state and read everything fresh from storage. */
+  async reload() {
+    this.db = null;
+    this.termsCache.clear();
+    this.tmCache.clear();
+    return this.load();
   }
 
   _mark(path, contentFn) {
@@ -182,6 +244,8 @@ export class Store {
     const entries = [...this.pending.entries()];
     this.pending.clear();
     for (const [p, get] of entries) await this.backend.putText(p, get(), `ln-translator: ${p}`);
+    // Remember our own revision so the next staleness check doesn't reload needlessly.
+    if (entries.some(([p]) => p === "db.json")) this.dbRev = await this._rev();
     return entries.length;
   }
 

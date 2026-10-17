@@ -112,11 +112,16 @@ const server = createServer(async (req, res) => {
     });
     if (method === "GET" && pathname === "/api/health") {
       const s = await stats(store);
+      const storage = store.backend?.info ? await store.backend.info().catch(() => null) : null;
       return json(res, 200, {
-        ok: true, at: Date.now(), storage: store.backendName, storageDescription: store.describe(),
+        ok: true, at: Date.now(), storage: store.backendName, storageDescription: store.describe(), storage,
         keys: { groq: !!process.env.GROQ_API_KEY, gemini: !!process.env.GEMINI_API_KEY },
         editTokenRequired: !!EDIT_TOKEN, stats: s,
       });
+    }
+    if (method === "POST" && pathname === "/api/reload") {
+      await store.reload();
+      return json(res, 200, { reloaded: true, at: Date.now() });
     }
     if (method === "GET" && pathname === "/api/languages") return json(res, 200, LANGUAGES);
     if (method === "GET" && pathname === "/api/providers") return json(res, 200, publicProviders());
@@ -141,7 +146,7 @@ const server = createServer(async (req, res) => {
       if (!b.text?.trim()) throw new Error("No text provided.");
       if (!b.target) throw new Error("No target language selected.");
       const result = await translateText(b.text, {
-        source: b.source || "auto", target: b.target, engine: b.engine || "free",
+        source: b.source || "auto", target: b.target, engine: "ai",
         maxChunk: Math.min(Math.max(parseInt(b.maxChunk, 10) || 1800, 200), 6000),
         keepHonorifics: b.keepHonorifics !== false, formality: b.formality || "match",
         glossary: parseGlossary(b.glossary),
@@ -152,12 +157,15 @@ const server = createServer(async (req, res) => {
     }
 
     /* ---- library ---- */
-    if (pathname === "/api/works" && method === "GET") return json(res, 200, await listWorks(store, { q: q.q || "" }));
+    if (pathname === "/api/works" && method === "GET") {
+      store.maybeRefresh?.(120000).catch(() => {});
+      return json(res, 200, await listWorks(store, { q: q.q || "" }));
+    }
     if (pathname === "/api/works" && method === "POST") {
       const b = await readJson(req);
       const result = await ingestText(store, {
         title: b.title, author: b.author, sourceLang: normalizeCode(b.sourceLang || b.source || "auto"),
-        sourceUrl: b.sourceUrl, chapterTitle: b.chapterTitle,
+        sourceUrl: b.sourceUrl, chapterTitle: b.chapterTitle, volume: b.volume || "",
         chapterIndex: b.chapterIndex != null && b.chapterIndex !== "" ? parseInt(b.chapterIndex, 10) : null,
         text: b.text, autoTranslateTo: (b.autoTranslateTo || []).map(normalizeCode), settings: b.settings || {},
       });
@@ -176,15 +184,19 @@ const server = createServer(async (req, res) => {
       const b = await readJson(req);
       const result = await bulkIngest(store, {
         title: b.title, author: b.author, sourceLang: normalizeCode(b.sourceLang || b.source || "auto"),
-        sourceUrl: b.sourceUrl, text: b.text, chapters: b.chapters,
+        sourceUrl: b.sourceUrl, volume: b.volume || "", text: b.text, chapters: b.chapters,
         autoTranslateTo: (b.autoTranslateTo || []).map(normalizeCode), settings: b.settings || {},
       });
       return json(res, 200, { ...result, url: `/#/work/${result.workId}` });
     }
     if (pathname === "/api/works/preview-split" && method === "POST") {
       const b = await readJson(req);
-      const chapters = splitChapters(b.text || "").map((c) => ({ title: c.title, chars: c.text.length }));
-      return json(res, 200, { count: chapters.length, chapters });
+      const chapters = splitChapters(b.text || "", { defaultVolume: b.volume || "" });
+      const volumes = [...new Set(chapters.map((c) => c.volume).filter(Boolean))];
+      return json(res, 200, {
+        count: chapters.length, volumes,
+        chapters: chapters.map((c) => ({ title: c.title, volume: c.volume, chars: c.text.length })),
+      });
     }
 
     if (seg[0] === "api" && seg[1] === "works" && seg[2]) {
@@ -236,7 +248,7 @@ const server = createServer(async (req, res) => {
         if (seg.length === 5 && method === "DELETE") return json(res, 200, await deleteChapter(store, { workId, chapterId }));
         if (seg[5] === "translate" && method === "POST") {
           const b = await readJson(req);
-          return json(res, 200, await translateChapter(store, { workId, chapterId, target: normalizeCode(b.target), force: !!b.force, strict: b.strict !== false }));
+          return json(res, 200, await translateChapter(store, { workId, chapterId, target: normalizeCode(b.target), force: !!b.force }));
         }
         if (seg[5] === "versions" && seg[6] && seg[7] === "restore" && method === "POST") {
           return json(res, 200, await restoreVersion(store, { workId, chapterId, hash: decodeURIComponent(seg[6]) }));

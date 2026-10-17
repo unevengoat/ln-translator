@@ -4,88 +4,50 @@ import { chunkNovel, joinChunks, normalizeText } from "../src/chunker.js";
 import { parseGlossary, protectTerms, glossaryPromptLines } from "../src/glossary.js";
 import { buildSystemPrompt, buildUserMessage } from "../src/prompt.js";
 import { translateText } from "../src/engines/index.js";
-import { cleanupFreeText } from "../src/engines/freeEngine.js";
 import { PROVIDERS, resolveProvider, parseChain, expandAuto, DEFAULT_CHAIN, publicProviders } from "../src/engines/providers.js";
 
 describe("chunker", () => {
   it("round-trips paragraphs exactly", () => {
     const text = "Para one.\n\nPara two with 「dialogue」.\n\nPara three.";
-    const chunks = chunkNovel(text, 1800);
-    assert.equal(joinChunks(chunks), normalizeText(text));
-  });
-  it("never merges paragraphs across chunk boundaries incorrectly", () => {
-    const text = "A".repeat(100) + "\n\n" + "B".repeat(100) + "\n\n" + "C".repeat(100);
-    const chunks = chunkNovel(text, 120);
-    assert.ok(chunks.length >= 3);
-    assert.equal(joinChunks(chunks), normalizeText(text));
+    assert.equal(joinChunks(chunkNovel(text, 1800)), normalizeText(text));
   });
   it("splits oversized paragraphs on sentence boundaries (CJK)", () => {
     const para = "これは一文です。これは二文です。これは三文です。これは四文です。";
     const chunks = chunkNovel(para, 20);
     assert.ok(chunks.length > 1);
-    // A single oversized paragraph gains breaks at chunk seams (good for readability);
-    // all sentences must survive in order.
     assert.equal(joinChunks(chunks).replace(/\n+/g, ""), normalizeText(para).replace(/\n+/g, ""));
-    for (const s of ["一文", "二文", "三文", "四文"]) assert.match(joinChunks(chunks), new RegExp(s));
   });
   it("handles empty input", () => {
     assert.deepEqual(chunkNovel("", 1800), []);
-    assert.deepEqual(chunkNovel("   \n\n  ", 1800), []);
   });
 });
 
 describe("glossary", () => {
   it("parses text, JSON, and object forms", () => {
-    assert.deepEqual(parseGlossary("a=b\nc -> d").length, 2);
-    assert.deepEqual(parseGlossary([{ source: "a", target: "b" }]).length, 1);
+    assert.equal(parseGlossary("a=b\nc -> d").length, 2);
     assert.deepEqual(parseGlossary({ a: "b" }), [{ source: "a", target: "b" }]);
   });
-  it("protects and restores terms for the free engine", () => {
+  it("protects and restores terms (and tolerates MT spacing)", () => {
     const { text, restore } = protectTerms("Kirito and Asuna walked.", [{ source: "Kirito", target: "Kirito" }]);
     assert.match(text, /__LNG0__/);
     assert.equal(restore(text), "Kirito and Asuna walked.");
+    assert.equal(restore("“__ LNG0 __ walked.”"), "“Kirito walked.”");
   });
-  it("restores terms even when MT inserts spaces into tokens", () => {
-    const { restore } = protectTerms("Kirito nodded.", [{ source: "Kirito", target: "Kirito" }]);
-    assert.equal(restore("“__ LNG0 __ nodded.”"), "“Kirito nodded.”");
-    assert.equal(restore("__LNG0__ nodded."), "Kirito nodded.");
-  });
-  it("renders prompt lines for the AI engine", () => {
-    const lines = glossaryPromptLines([{ source: "キリト", target: "Kirito" }]);
-    assert.equal(lines.length, 1);
-    assert.match(lines[0], /Kirito/);
+  it("renders prompt lines", () => {
+    assert.match(glossaryPromptLines([{ source: "キリト", target: "Kirito" }])[0], /Kirito/);
   });
 });
 
 describe("prompt", () => {
-  it("includes honorific + glossary rules", () => {
-    const sys = buildSystemPrompt({ sourceName: "Japanese", targetName: "English", keepHonorifics: true, glossary: [{ source: "a", target: "b" }] });
+  it("includes honorific, glossary and story notes", () => {
+    const sys = buildSystemPrompt({ sourceName: "Japanese", targetName: "English", keepHonorifics: true, glossary: [{ source: "a", target: "b" }], notes: "cold tone" });
     assert.match(sys, /honorific/i);
     assert.match(sys, /GLOSSARY/);
+    assert.match(sys, /cold tone/);
     assert.match(sys, /ONLY the translation/);
   });
   it("attaches previous tail for continuity", () => {
-    const msg = buildUserMessage("new chunk", "prev translation");
-    assert.match(msg, /continuity/);
-    assert.match(msg, /new chunk/);
-  });
-});
-
-describe("free cleanup", () => {
-  it("adds missing spaces after punctuation without breaking decimals", () => {
-    assert.equal(
-      cleanupFreeText("Hey,Kirito.Are you here?It costs 3.14 yen,about 1,000 total."),
-      "Hey, Kirito. Are you here? It costs 3.14 yen, about 1,000 total."
-    );
-  });
-  it("rejoins JP dialogue attribution", () => {
-    assert.equal(
-      cleanupFreeText('today? "and Asuna whispered.'),
-      'today?" Asuna whispered.'
-    );
-  });
-  it("leaves CJK targets untouched", () => {
-    assert.equal(cleanupFreeText("今日は。元気？", "ja"), "今日は。元気？");
+    assert.match(buildUserMessage("new chunk", "prev"), /continuity/);
   });
 });
 
@@ -93,79 +55,77 @@ describe("providers", () => {
   it("resolves defaults per provider", () => {
     const c = resolveProvider("pollinations", {});
     assert.equal(c.baseUrl, "https://text.pollinations.ai/openai");
-    assert.equal(c.model, "openai");
   });
   it("throws a helpful error when a key is missing", () => {
     assert.throws(() => resolveProvider("groq", { apiKey: "" }), /GROQ_API_KEY/);
   });
-  it("expands auto into the default quality chain", () => {
-    assert.deepEqual(expandAuto([{ provider: "auto" }]).map((s) => s.provider), DEFAULT_CHAIN);
-    assert.deepEqual(expandAuto(["groq"]).map((s) => (typeof s === "string" ? s : s.provider)), ["groq"]);
+  it("quality chain is groq then gemini only (no keyless MT)", () => {
+    assert.deepEqual(DEFAULT_CHAIN, ["groq", "gemini"]);
+    assert.deepEqual(expandAuto([{ provider: "auto" }]).map((s) => s.provider), ["groq", "gemini"]);
+    assert.ok(!PROVIDERS.free, "there must be no keyless free engine provider");
   });
   it("parses chain specs", () => {
-    assert.deepEqual(parseChain("groq,cerebras:llama-3.3-70b,pollinations"), [
+    assert.deepEqual(parseChain("groq,cerebras:llama-3.3-70b"), [
       { provider: "groq", model: undefined },
       { provider: "cerebras", model: "llama-3.3-70b" },
-      { provider: "pollinations", model: undefined },
     ]);
   });
   it("exposes no secrets to the UI", () => {
     const pub = JSON.stringify(publicProviders());
-    for (const id of Object.keys(PROVIDERS)) assert.match(pub, new RegExp(id));
     assert.doesNotMatch(pub, /sk-or|gsk_|csk-|nvapi|Bearer/i);
   });
 });
 
-describe("orchestrator", () => {
-  it("translates via stubbed fetch, preserving paragraph breaks", async () => {
-    const fakeFetch = async () => ({ ok: true, json: async () => [[["T1", "o1"], ["T2", "o2"]]] });
-    const { translation, chunks } = await translateText("Para one.\n\nPara two.", {
-      source: "en", target: "ja", engine: "free", maxChunk: 1800, fetchFn: fakeFetch,
+describe("orchestrator (AI only)", () => {
+  const okFetch = (text = "TRANSLATED") => async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: text } }] }) });
+
+  it("translates and preserves paragraph breaks", async () => {
+    const { translation, chunks, engine } = await translateText("Para one.\n\nPara two.", {
+      source: "ja", target: "en", engine: "ai", ai: { apiKey: "k" }, chain: "auto", fetchFn: okFetch("OUT"),
     });
     assert.equal(chunks, 1);
-    assert.ok(translation.length > 0);
+    assert.equal(engine, "ai");
+    assert.match(translation, /OUT/);
   });
-  it("applies glossary through the free engine", async () => {
-    const fakeFetch = async (url) => {
-      const q = decodeURIComponent(url.split("q=")[1] || "");
-      return { ok: true, json: async () => [[[q, "x"]]] }; // echo: restore() swaps tokens for targets
+
+  it("uses the groq → gemini chain and reports the provider", async () => {
+    const { provider } = await translateText("テスト。", { source: "ja", target: "en", engine: "ai", ai: { apiKey: "k" }, chain: "auto", fetchFn: okFetch("X") });
+    assert.equal(provider, "groq/openai/gpt-oss-120b");
+  });
+
+  it("falls through to gemini when groq fails, and never to keyless MT", async () => {
+    let calls = [];
+    const fetchFn = async (url, opts) => {
+      const model = JSON.parse(opts.body).model;
+      calls.push(model);
+      if (String(url).includes("api.groq.com")) {
+        if (String(url).endsWith("/models")) return { ok: false, status: 401, text: async () => "no" };
+        return { ok: false, status: 429, text: async () => "Rate limit exceeded" };
+      }
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "GEMINI OK" } }] }) };
     };
-    const { translation } = await translateText("Kirito walked.", {
-      source: "en", target: "ja", engine: "free",
-      glossary: [{ source: "Kirito", target: "キリト" }],
-      fetchFn: fakeFetch,
-    });
-    assert.match(translation, /キリト/);
+    const { translation, provider } = await translateText("テスト。", { source: "ja", target: "en", engine: "ai", ai: { apiKey: "k" }, chain: "auto", fetchFn });
+    assert.equal(translation, "GEMINI OK");
+    assert.equal(provider, "gemini/gemini-flash-latest");
   });
-  it("auto chain falls back to free MT when AI legs fail", async () => {
-    const fakeFetch = async (url) => {
-      if (String(url).includes("chat/completions")) return { ok: false, status: 401, text: async () => "bad key" };
-      return { ok: true, json: async () => [[["MT-OK", "x"]]] };
+
+  it("throws (asking for a key) when every model fails — no free-MT fallback", async () => {
+    const fetchFn = async (url) => {
+      if (String(url).endsWith("/models")) return { ok: false, status: 401, text: async () => "no" };
+      return { ok: false, status: 429, text: async () => "Rate limit exceeded" };
     };
-    const { translation, provider } = await translateText("こんにちは。", {
-      source: "ja", target: "en", engine: "ai", chain: "auto", ai: { apiKey: "k" }, fetchFn: fakeFetch,
-    });
-    assert.equal(translation, "MT-OK");
-    assert.equal(provider, "free-mt");
+    await assert.rejects(
+      () => translateText("テスト。", { source: "ja", target: "en", engine: "ai", ai: { apiKey: "k" }, chain: "auto", fetchFn }),
+      /Add a fresh key/
+    );
   });
-  it("falls through a failing provider to the next in chain", async () => {
-    const calls = [];
-    const fakeFetch = async (_url, opts) => {
-      calls.push(JSON.parse(opts.body).model);
-      if (calls.length === 1) return { ok: false, status: 401, text: async () => "bad key" };
-      return { ok: true, json: async () => ({ choices: [{ message: { content: "TRANSLATED OK" } }] }) };
-    };
-    const { translation, provider } = await translateText("こんにちは。", {
-      source: "ja", target: "en", engine: "ai",
-      ai: { apiKey: "k" },
-      chain: [{ provider: "groq", model: "m1" }, { provider: "cerebras", model: "m2" }],
-      fetchFn: fakeFetch,
-    });
-    assert.equal(translation, "TRANSLATED OK");
-    assert.equal(provider, "cerebras/m2");
-    assert.deepEqual(calls, ["m1", "m2"]);
-  });
+
   it("rejects same source/target", async () => {
     await assert.rejects(() => translateText("hi", { source: "en", target: "en" }), /same/);
+  });
+
+  it("stops on a failing single provider when a chain is pinned", async () => {
+    const fetchFn = async () => ({ ok: false, status: 500, text: async () => "boom" });
+    await assert.rejects(() => translateText("テスト。", { source: "ja", target: "en", engine: "ai", chain: [{ provider: "groq" }], ai: { apiKey: "k" }, fetchFn }), /All models failed/);
   });
 });

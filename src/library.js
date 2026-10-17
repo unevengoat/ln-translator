@@ -30,7 +30,7 @@ const newWork = (id, { title, author, sourceLang, sourceUrl }) => ({
   id, title: String(title).trim(), author: String(author || "").trim(),
   lang: sourceLang || "auto", sourceUrl: sourceUrl || "",
   createdAt: Date.now(), updatedAt: Date.now(),
-  chapters: [], languages: [], models: {}, settings: { ...DEFAULT_SETTINGS },
+  chapters: [], volumes: [], languages: [], models: {}, settings: { ...DEFAULT_SETTINGS },
   terms: {}, tmSegments: {}, usage: { calls: 0, chunks: 0, byModel: {} }, termExtracted: {},
 });
 
@@ -38,28 +38,55 @@ const newWork = (id, { title, author, sourceLang, sourceUrl }) => ({
 
 // Note: no \b — it never matches after a CJK character (話 is not a "word" char).
 const CHAPTER_MARKER = /^\s*(?:第\s*\d+\s*[章話话節节回]|chapter\s+\d+|ch\.?\s*\d+)(?:[\s:：.。\-—]|$)/i;
+const VOLUME_MARKER = /^\s*(?:(?:volume|vol\.?|book)\s*\d+(?:[\s:：.\-—]|$)|\d+\s*巻(?:[\s:：.。\-—]|$)|第\s*\d+\s*[巻卷](?:[\s:：.。\-—]|$))/i;
 
-/** Split a big paste into chapters on common chapter markers. */
-export function splitChapters(text) {
+export const volumeLabel = (v) => String(v ?? "").trim();
+export const volumeKeyOf = (label) => volumeLabel(label).replace(/\s+/g, " ").toLowerCase();
+
+/** Find or create a volume entry, returning its key. */
+export function ensureVolume(work, label) {
+  const key = volumeKeyOf(label);
+  work.volumes = work.volumes || [];
+  let vol = work.volumes.find((v) => v.key === key);
+  if (!vol) {
+    vol = { key, label: volumeLabel(label), order: work.volumes.length, createdAt: Date.now() };
+    work.volumes.push(vol);
+  }
+  return vol;
+}
+
+/** Chapters ordered by volume, then chapter index. */
+export function sortChapters(work) {
+  const order = new Map((work.volumes || []).map((v) => [v.key, v.order]));
+  return [...work.chapters].sort((a, b) => {
+    const av = order.get(a.volumeKey || "") ?? 0;
+    const bv = order.get(b.volumeKey || "") ?? 0;
+    return av - bv || (a.index || 0) - (b.index || 0);
+  });
+}
+
+/**
+ * Split a big paste into volumes and chapters on common markers
+ * (English + CJK): "Volume 1", "Vol. 2", "第1巻", "第1話", "Chapter 3".
+ */
+export function splitChapters(text, { defaultVolume = "" } = {}) {
   const norm = normalizeText(text);
   if (!norm) return [];
-  const lines = norm.split("\n");
   const parts = [];
+  let volume = volumeLabel(defaultVolume);
   let current = null;
-  for (const line of lines) {
-    if (CHAPTER_MARKER.test(line)) {
-      if (current) parts.push(current);
-      current = { title: line.trim(), lines: [] };
-    } else {
-      if (!current) current = { title: "", lines: [] };
-      current.lines.push(line);
-    }
+  const flush = () => { if (current) parts.push(current); current = null; };
+  for (const line of norm.split("\n")) {
+    if (VOLUME_MARKER.test(line)) { flush(); volume = line.trim(); continue; }
+    if (CHAPTER_MARKER.test(line)) { flush(); current = { volume, title: line.trim(), lines: [] }; continue; }
+    if (!current) current = { volume, title: "", lines: [] };
+    current.lines.push(line);
   }
-  if (current) parts.push(current);
+  flush();
   const chapters = parts
-    .map((p, i) => ({ title: p.title || `Chapter ${i + 1}`, text: p.lines.join("\n").trim() }))
+    .map((p, i) => ({ volume: p.volume, title: p.title || `Chapter ${i + 1}`, text: p.lines.join("\n").trim() }))
     .filter((c) => c.text);
-  return chapters.length ? chapters : [{ title: "", text: norm }];
+  return chapters.length ? chapters : [{ volume: volumeLabel(defaultVolume), title: "", text: norm }];
 }
 
 /* ------------------------------------------------------------------- terms */
@@ -98,7 +125,7 @@ export async function ensureTermsForLang(store, workId, lang, { fetchFn = fetch 
 
 export async function ingestText(store, {
   title, author = "", sourceLang = "auto", sourceUrl = "",
-  chapterTitle = "", chapterIndex = null, text,
+  chapterTitle = "", chapterIndex = null, volume = "", text,
   autoTranslateTo = [], settings = {}, fetchFn = fetch, translate = translateWithPolicy,
 } = {}) {
   if (!title || !String(title).trim()) throw new Error("A story title is required.");
@@ -121,26 +148,29 @@ export async function ingestText(store, {
     const dup = work.chapters.find((c) => c.versions?.some((v) => v.hash === bodyHash));
     if (dup) return { workId, chapterId: dup.id, duplicate: true, created: false };
 
-    const index = chapterIndex ?? (work.chapters.length + 1);
-    const atIndex = work.chapters.find((c) => c.index === index);
+    // Volumes are just labels; a chapter is identified by (volume, index).
+    const vol = ensureVolume(work, volume);
+    const inVolume = work.chapters.filter((c) => (c.volumeKey || "") === vol.key);
+    const index = chapterIndex != null && chapterIndex !== "" ? parseInt(chapterIndex, 10) : inVolume.length + 1;
+    const atIndex = inVolume.find((c) => c.index === index);
     if (atIndex) {
       atIndex.versions.push({ hash: sourceHash, at: Date.now(), title: chapterTitle || atIndex.title });
       atIndex.sourceHash = sourceHash;
       atIndex.bodyHash = bodyHash;
       atIndex.updatedAt = Date.now();
       work.updatedAt = Date.now();
-      logActivity(db, { type: "chapter-version", workId, chapterId: atIndex.id, detail: atIndex.title });
-      return { workId, chapterId: atIndex.id, created: false, version: true };
+      logActivity(db, { type: "chapter-version", workId, chapterId: atIndex.id, detail: atIndex.title, lang: work.lang });
+      return { workId, chapterId: atIndex.id, created: false, version: true, volume: vol.label };
     }
     const id = uid("c");
     work.chapters.push({
-      id, index, title: chapterTitle || `Chapter ${index}`, sourceHash, bodyHash,
-      versions: [{ hash: sourceHash, at: Date.now() }], createdAt: Date.now(), updatedAt: Date.now(),
+      id, index, title: chapterTitle || `Chapter ${index}`, volumeKey: vol.key, volume: vol.label,
+      sourceHash, bodyHash, versions: [{ hash: sourceHash, at: Date.now() }], createdAt: Date.now(), updatedAt: Date.now(),
     });
     work.languages = [...new Set([...work.languages, work.lang])];
     work.updatedAt = Date.now();
-    logActivity(db, { type: "chapter-added", workId, chapterId: id, detail: work.chapters.at(-1).title, lang: work.lang });
-    return { workId, chapterId: id, created: true, workCreated: true };
+    logActivity(db, { type: "chapter-added", workId, chapterId: id, detail: `${vol.label ? vol.label + " · " : ""}${chapterTitle || `Chapter ${index}`}`, lang: work.lang });
+    return { workId, chapterId: id, created: true, workCreated: true, volume: vol.label };
   });
 
   if (result.created) {
@@ -178,21 +208,22 @@ export async function ingestText(store, {
 
 /** Ingest a multi-chapter paste or a list of {title, text}. */
 export async function bulkIngest(store, {
-  title, author = "", sourceLang = "auto", sourceUrl = "", text, chapters,
+  title, author = "", sourceLang = "auto", sourceUrl = "", text, chapters, volume = "",
   autoTranslateTo = [], settings = {}, fetchFn = fetch, translate = translateWithPolicy,
 } = {}) {
-  const list = chapters?.length ? chapters : splitChapters(text);
+  const list = chapters?.length ? chapters : splitChapters(text, { defaultVolume: volume });
   const out = [];
   let workId = null;
   for (let i = 0; i < list.length; i++) {
     const c = list[i];
     const r = await ingestText(store, {
       title, author, sourceLang, sourceUrl,
-      chapterTitle: c.title || `Chapter ${i + 1}`, chapterIndex: i + 1,
+      chapterTitle: c.title || `Chapter ${i + 1}`, chapterIndex: null,
+      volume: c.volume ?? volume ?? "",
       text: c.text, autoTranslateTo: [], settings, fetchFn, translate,
     });
     workId = r.workId;
-    out.push({ chapterId: r.chapterId, title: c.title || `Chapter ${i + 1}`, created: r.created, duplicate: !!r.duplicate, version: !!r.version });
+    out.push({ chapterId: r.chapterId, title: c.title || `Chapter ${i + 1}`, volume: r.volume || "", created: r.created, duplicate: !!r.duplicate, version: !!r.version });
   }
   const translated = [];
   for (const target of autoTranslateTo) {
@@ -210,7 +241,7 @@ export async function bulkIngest(store, {
 /* -------------------------------------------------------------- translation */
 
 export async function translateChapter(store, {
-  workId, chapterId, target, force = false, strict = true, fetchFn = fetch, translate = translateWithPolicy, onProgress,
+  workId, chapterId, target, force = false, fetchFn = fetch, translate = translateWithPolicy, onProgress,
 } = {}) {
   if (!target) throw new Error("A target language is required.");
   const db0 = await store.load();
@@ -243,7 +274,7 @@ export async function translateChapter(store, {
     const i = todo[n];
     const r = await translate(chunks[i], {
       source: work.lang, target, glossary, prevTail: results[i - 1]?.slice(-500) || "",
-      pinned, fetchFn, strict, keepHonorifics: settings.keepHonorifics, formality: settings.formality, notes: settings.notes,
+      pinned, fetchFn, keepHonorifics: settings.keepHonorifics, formality: settings.formality, notes: settings.notes,
     });
     results[i] = r.text.trim();
     warnings.push(...lintTranslation(chunks[i], results[i], { target, glossary }));
@@ -315,6 +346,7 @@ export async function listWorks(store, { q = "", limit = 200 } = {}) {
     .map((w) => ({
       ...w,
       chapterCount: w.chapters.length,
+      volumeCount: (w.volumes || []).filter((v) => v.label).length,
       translatedCount: Object.values(db.translations).filter((t) => t.workId === w.id).length,
       warnings: Object.values(db.translations).filter((t) => t.workId === w.id && t.qa && !t.qa.ok).length,
     }));
@@ -324,20 +356,27 @@ export async function getWork(store, workId) {
   const db = await store.load();
   const work = db.works[workId];
   if (!work) return null;
-  const chapters = [...work.chapters]
-    .sort((a, b) => a.index - b.index)
-    .map((c) => {
-      const trs = Object.values(db.translations).filter((t) => t.chapterId === c.id);
-      return {
-        ...c,
-        translations: trs.map((t) => t.target),
-        versionCount: c.versions?.length || 1,
-        warnings: trs.reduce((n, t) => n + (t.qa?.warns || 0) + (t.qa?.errors || 0), 0),
-        qa: trs.map((t) => ({ lang: t.target, warnings: t.warnings || [], qa: t.qa })).filter((t) => t.warnings?.length),
-      };
-    });
+  const chapters = sortChapters(work).map((c) => {
+    const trs = Object.values(db.translations).filter((t) => t.chapterId === c.id);
+    return {
+      ...c,
+      translations: trs.map((t) => t.target),
+      versionCount: c.versions?.length || 1,
+      warnings: trs.reduce((n, t) => n + (t.qa?.warns || 0) + (t.qa?.errors || 0), 0),
+      qa: trs.map((t) => ({ lang: t.target, warnings: t.warnings || [], qa: t.qa })).filter((t) => t.warnings?.length),
+    };
+  });
   const terms = await store.loadTerms(workId);
-  return { ...work, chapters, terms, translatedCount: chapters.reduce((n, c) => n + c.translations.length, 0) };
+  const volumes = (work.volumes || [])
+    .slice()
+    .sort((a, b) => a.order - b.order)
+    .map((v) => ({ ...v, chapterCount: chapters.filter((c) => (c.volumeKey || "") === v.key).length }))
+    .filter((v) => v.chapterCount > 0 || v.label);
+  return {
+    ...work, chapters, volumes, terms,
+    translatedCount: chapters.reduce((n, c) => n + c.translations.length, 0),
+    volumeCount: volumes.filter((v) => v.label).length,
+  };
 }
 
 export async function getChapter(store, { workId, chapterId, lang = "" }) {
@@ -358,13 +397,13 @@ export async function getChapter(store, { workId, chapterId, lang = "" }) {
       record = { provider: rec.provider, at: rec.at, warnings: rec.warnings || [], qa: rec.qa };
     }
   }
-  const chapters = [...work.chapters].sort((a, b) => a.index - b.index);
+  const chapters = sortChapters(work);
   const pos = chapters.findIndex((c) => c.id === chapter.id);
   return {
-    work: { id: work.id, title: work.title, author: work.author, lang: work.lang, settings: work.settings, languages: work.languages },
+    work: { id: work.id, title: work.title, author: work.author, lang: work.lang, settings: work.settings, languages: work.languages, volumes: work.volumes || [] },
     chapter, original, translation, available, record,
-    prev: pos > 0 ? { id: chapters[pos - 1].id, title: chapters[pos - 1].title } : null,
-    next: pos < chapters.length - 1 ? { id: chapters[pos + 1].id, title: chapters[pos + 1].title } : null,
+    prev: pos > 0 ? { id: chapters[pos - 1].id, title: chapters[pos - 1].title, volume: chapters[pos - 1].volume } : null,
+    next: pos < chapters.length - 1 ? { id: chapters[pos + 1].id, title: chapters[pos + 1].title, volume: chapters[pos + 1].volume } : null,
   };
 }
 
@@ -375,6 +414,7 @@ export async function stats(store, { fetchFn } = {}) {
   const warns = translations.reduce((n, t) => n + (t.qa?.warns || 0) + (t.qa?.errors || 0), 0);
   return {
     works: works.length,
+    volumes: works.reduce((n, w) => n + (w.volumes || []).filter((v) => v.label).length, 0),
     chapters: works.reduce((n, w) => n + w.chapters.length, 0),
     translations: translations.length,
     terms: works.reduce((n, w) => n + Object.values(w.terms || {}).reduce((a, b) => a + b, 0), 0),

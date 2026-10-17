@@ -73,14 +73,15 @@ function envKey(provider) {
 }
 
 /**
- * Translate one chunk under the groq→gemini policy.
+ * Translate one chunk under the Groq→Gemini policy.
  * pinned: {provider, model} to try first (keeps one story on one model).
- * strict: never fall back to keyless MT — throw and ask for a new key instead.
+ * There is no keyless fallback: if both models are unavailable we throw and ask
+ * for a fresh key rather than silently changing the story's voice or quality.
  */
 export async function translateWithPolicy(chunk, opts = {}) {
   const {
     source = "auto", target = "en", keepHonorifics = true, formality = "match",
-    glossary = [], prevTail = "", pinned = null, strict = true, notes = "",
+    glossary = [], prevTail = "", pinned = null, notes = "",
     fetchFn = fetch, timeoutMs = 120000,
   } = opts;
   const legs = [];
@@ -131,14 +132,6 @@ export async function translateWithPolicy(chunk, opts = {}) {
     }
   }
 
-  if (!strict) {
-    const { translateFree } = await import("./freeEngine.js");
-    const { protectTerms } = await import("./glossary.js");
-    const { text: guarded, restore } = protectTerms(chunk, glossary);
-    const text = restore(await translateFree(guarded, { source, target, fetchFn }));
-    attempts.push({ provider: "free-mt", ok: true });
-    return { text, provider: "free-mt", model: "mt", attempts };
-  }
   throw new Error(
     "Both story models are unavailable (Groq primary, Gemini backup). " +
     "Add a fresh key (Groq free tier: console.groq.com) and retry — nothing was overwritten. " +

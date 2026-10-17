@@ -20,7 +20,7 @@ export const PROVIDERS = {
     baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/",
     keyEnv: "GEMINI_API_KEY",
     needsKey: true,
-    models: ["gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.5-flash"],
+    models: ["gemini-flash-latest", "gemini-2.5-flash", "gemini-2.5-flash-lite"],
   },
   openrouter: {
     label: "OpenRouter (:free models)",
@@ -74,8 +74,8 @@ export function resolveProvider(name, overrides = {}) {
   return { provider: name in PROVIDERS ? name : "custom", baseUrl, apiKey, model, headers };
 }
 
-/** Quality-ordered default chain (benchmarked JA→EN). "free" = keyless MT safety net. */
-export const DEFAULT_CHAIN = ["groq", "gemini", "openrouter", "pollinations", "free"];
+/** Quality chain: Groq primary, Gemini extreme backup — nothing else. */
+export const DEFAULT_CHAIN = ["groq", "gemini"];
 
 /** Expand the magic provider "auto" into DEFAULT_CHAIN entries. */
 export function expandAuto(specs) {

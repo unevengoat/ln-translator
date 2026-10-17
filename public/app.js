@@ -1,4 +1,4 @@
-/* SPA: hash routing, shared library, reader with preferences, terms, activity,
+/* SPA: hash routing, shared library with volumes, reader, terms, activity,
    bulk upload, glossary import/export, backups, PWA. No framework. */
 const $ = (id) => document.getElementById(id);
 const API = async (path, opts) => {
@@ -9,7 +9,6 @@ const API = async (path, opts) => {
 };
 const post = (p, b) => API(p, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b) });
 const patch = (p, b) => API(p, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b) });
-const del = (p) => API(p, { method: "DELETE" });
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const LS = {
   get(k, d) { try { return JSON.parse(localStorage.getItem("ln." + k)) ?? d; } catch { return d; } },
@@ -22,7 +21,7 @@ function toast(msg, kind = "info") {
   el.textContent = msg;
   $("toasts").appendChild(el);
   setTimeout(() => el.classList.add("show"), 10);
-  setTimeout(() => { el.classList.remove("show"); setTimeout(() => el.remove(), 300); }, 4200);
+  setTimeout(() => { el.classList.remove("show"); setTimeout(() => el.remove(), 300); }, 4600);
 }
 function busy(btn, on, label) {
   if (!btn) return;
@@ -34,7 +33,22 @@ let LANG = [];
 let currentWork = null;
 let currentChapter = null;
 let currentLang = "";
+let currentVolume = null;
 let readerPrefs = LS.get("prefs", { fontSize: 18, theme: "auto", split: false });
+
+const langName = (code) => LANG.find((l) => l.code === code)?.name || code;
+
+/** Cheap source-language guess so people don't have to pick. */
+function detectLang(text) {
+  if (/[\u3040-\u309f\u30a0-\u30ff]/.test(text)) return "ja";   // kana
+  if (/[\uac00-\ud7af\u1100-\u11ff]/.test(text)) return "ko";   // hangul
+  if (/[\u4e00-\u9fff]/.test(text)) return "zh-CN";             // hanzi
+  if (/[àâçéèêëîïôûùüÿœ]/i.test(text)) return "fr";
+  if (/[äöüß]/i.test(text)) return "de";
+  if (/[åäö]/i.test(text)) return "sv";
+  if (/[ñáéíóú¿¡]/i.test(text)) return "es";
+  return "en";
+}
 
 /* ------------------------------------------------------------------- boot */
 document.querySelectorAll("nav button").forEach((b) => (b.onclick = () => (location.hash = b.dataset.route)));
@@ -53,7 +67,7 @@ async function boot() {
   for (const code of ["en", "es", "sv"]) {
     const label = document.createElement("label");
     label.className = "chip";
-    label.innerHTML = `<input type="checkbox" id="auto_${code}" value="${code}" ${code === "en" ? "checked" : ""}> ${LANG.find((l) => l.code === code)?.name || code}`;
+    label.innerHTML = `<input type="checkbox" id="auto_${code}" value="${code}" ${code === "en" ? "checked" : ""}> ${langName(code)}`;
     $("autoLangs").appendChild(label);
   }
   applyPrefs();
@@ -70,12 +84,14 @@ function show(view) {
 
 async function route() {
   const hash = location.hash || "#/";
-  const parts = hash.replace(/^#\/?/, "").split("/").filter(Boolean);
+  const [pathPart, queryPart] = hash.replace(/^#\/?/, "").split("?");
+  const parts = pathPart.split("/").filter(Boolean);
+  const qs = new URLSearchParams(queryPart || "");
   if (parts[0] === "work" && parts[1]) {
-    await openWork(parts[1], parts[3] || parts[2], parts[5] || new URLSearchParams(hash.split("?")[1] || "").get("lang"));
+    await openWork(parts[1], parts[3], qs.get("lang"));
     return;
   }
-  if (parts[0] === "add") { show("add"); return; }
+  if (parts[0] === "add") { show("add"); await prefillAdd(qs); return; }
   if (parts[0] === "activity") { show("activity"); loadActivity(); return; }
   if (parts[0] === "quick") { show("quick"); return; }
   if (parts[0] === "about") { show("about"); loadHealth(); return; }
@@ -92,9 +108,21 @@ async function loadHealth() {
     const h = await API("/api/health");
     $("healthBox").innerHTML =
       `<p>Storage: <strong>${esc(h.storageDescription)}</strong> (${esc(h.storage)})</p>` +
-      `<p>Models: Groq ${h.keys.groq ? "✅ configured" : "❌ missing"} · Gemini ${h.keys.gemini ? "✅ backup ready" : "— not set"}</p>` +
-      `<p>${h.stats.works} stories · ${h.stats.chapters} chapters · ${h.stats.translations} translations · ${h.stats.terms} terms · ${h.stats.tmSegments} memory segments · ${h.stats.calls} model calls · ${h.stats.warnings} QA warnings</p>` +
-      (h.editTokenRequired ? `<p class="hint">Editing is protected by an edit token.</p>` : `<p class="hint">Open editing (set EDIT_TOKEN to protect it).</p>`);
+      `<p>Models: Groq ${h.keys.groq ? "✅ primary" : "❌ missing"} · Gemini ${h.keys.gemini ? "✅ backup ready" : "— not set"}</p>` +
+      `<p>${h.stats.works} stories · ${h.stats.volumes || 0} volumes · ${h.stats.chapters} chapters · ${h.stats.translations} translations · ${h.stats.terms} terms · ${h.stats.tmSegments} memory segments · ${h.stats.calls} model calls · ${h.stats.warnings} QA warnings</p>`;
+    const s = h.storage;
+    if (s && s.provider === "github") {
+      const broad = s.broadToken;
+      $("tokenBox").innerHTML =
+        `<p>GitHub storage: <strong>${esc(s.repo)}</strong> @ ${esc(s.branch)} · ${s.ok ? "✅ reachable" : "❌ " + (s.status || s.error)}` +
+        `${s.private != null ? ` · ${s.private ? "private repo" : "public repo"}` : ""}${s.rateRemaining ? ` · ${s.rateRemaining} API calls left this hour` : ""}</p>` +
+        (broad
+          ? `<p class="warn-text">⚠ This token can access <strong>all</strong> your repositories (scopes: ${esc(s.scopes)}).
+             Switch to a fine-grained token limited to this one repo — see About → Storage docs on GitHub.</p>`
+          : `<p>✅ Token is scoped narrow (no broad <code>repo</code> scope reported).</p>`);
+    } else {
+      $("tokenBox").textContent = "";
+    }
     $("footerInfo").textContent = `Storage: ${h.storage} · Groq primary · Gemini backup`;
   } catch { /* ignore */ }
 }
@@ -102,7 +130,7 @@ async function loadHealth() {
 /* ------------------------------------------------------------------ library */
 async function loadStats() {
   const s = await API("/api/stats");
-  $("globalStats").textContent = `${s.works} stories · ${s.chapters} chapters · ${s.translations} translations · ${s.terms} terms · ${s.tmSegments} memory segments${s.warnings ? ` · ⚠ ${s.warnings} QA warnings` : ""}`;
+  $("globalStats").textContent = `${s.works} stories · ${s.volumes || 0} volumes · ${s.chapters} chapters · ${s.translations} translations · ${s.terms} terms${s.warnings ? ` · ⚠ ${s.warnings} QA warnings` : ""}`;
 }
 
 async function loadWorks() {
@@ -111,31 +139,35 @@ async function loadWorks() {
     ? works.map((w) => `
       <div class="work" data-id="${w.id}">
         <h3>${esc(w.title)} ${w.warnings ? `<span class="badge warn">⚠ ${w.warnings}</span>` : ""}</h3>
-        <p class="hint">${esc(w.author || "unknown author")} · source ${esc(langName(w.lang))} · ${w.chapterCount} chapter(s) · ${w.translatedCount} translation(s)
+        <p class="hint">${esc(w.author || "unknown author")} · source ${esc(langName(w.lang))} ·
+          ${w.volumeCount ? `${w.volumeCount} volume(s) · ` : ""}${w.chapterCount} chapter(s) · ${w.translatedCount} translation(s)
           ${w.languages?.length ? "· " + w.languages.map((l) => esc(langName(l))).join(", ") : ""}</p>
       </div>`).join("")
-    : `<p class="hint">No stories yet — add a chapter to start the shared library.</p>`;
+    : `<p class="hint">No stories yet — press <strong>Add chapters / volumes</strong> to start the shared library.</p>`;
   document.querySelectorAll(".work").forEach((el) => (el.onclick = () => (location.hash = `#/work/${el.dataset.id}`)));
 }
 
 $("search").addEventListener("keydown", (e) => { if (e.key === "Enter") location.hash = `#/search/${encodeURIComponent($("search").value)}`; });
 $("searchGo").onclick = () => (location.hash = `#/search/${encodeURIComponent($("search").value)}`);
+$("gotoAdd").onclick = () => (location.hash = "#/add");
 
 function loadContinue() {
   const recent = Object.entries(LS.get("progress", {})).map(([k, v]) => ({ ...v, key: k })).sort((a, b) => b.at - a.at).slice(0, 6);
   $("continueWrap").classList.toggle("hidden", !recent.length);
-  $("continueList").innerHTML = recent.map((r) => `<a class="chip" href="#/work/${r.workId}/chapter/${r.chapterId}?lang=${r.lang}">${esc(r.title)} · ${esc(langName(r.lang))}</a>`).join("");
+  $("continueList").innerHTML = recent.map((r) => `<a class="chip" href="#/work/${r.workId}?lang=${r.lang}&chapter=${r.chapterId}">${esc(r.title)} · ${esc(langName(r.lang))}</a>`).join("");
 }
-
-const langName = (code) => LANG.find((l) => l.code === code)?.name || code;
 
 /* ------------------------------------------------------------------- reader */
 async function openWork(workId, chapterId, lang) {
   currentWork = await API("/api/works/" + workId);
+  const qs = new URLSearchParams((location.hash.split("?")[1] || ""));
+  chapterId = chapterId || qs.get("chapter") || null;
+  lang = lang || qs.get("lang") || null;
   currentChapter = chapterId || currentWork.chapters[0]?.id || null;
   const langs = [...new Set([...currentWork.languages, "en", "es", "sv"])].filter((l) => l !== currentWork.lang);
   currentLang = lang && langs.includes(lang) ? lang : langs.includes("en") ? "en" : langs[0];
   $("readerTitle").textContent = currentWork.title + (currentWork.author ? " — " + currentWork.author : "");
+  fillVolumeSelect();
   fillChapterSelect();
   fillLangSelect();
   show("reader");
@@ -144,10 +176,28 @@ async function openWork(workId, chapterId, lang) {
   await loadChapter();
 }
 
+const workVolumes = () => (currentWork?.volumes || []).filter((v) => v.chapterCount > 0);
+const chaptersOfVolume = (key) => currentWork.chapters.filter((c) => (c.volumeKey || "") === (key || ""));
+
+function fillVolumeSelect() {
+  const vols = workVolumes();
+  const labelled = vols.filter((v) => v.label);
+  $("volumeWrap").classList.toggle("hidden", labelled.length === 0);
+  if (!labelled.length) { currentVolume = vols[0]?.key || ""; return; }
+  $("volumeSelect").innerHTML = vols
+    .map((v) => `<option value="${esc(v.key)}">${esc(v.label || "Chapters")} (${v.chapterCount})</option>`).join("");
+  const withCurrent = vols.find((v) => chaptersOfVolume(v.key).some((c) => c.id === currentChapter));
+  currentVolume = withCurrent?.key ?? vols[0]?.key ?? "";
+  $("volumeSelect").value = currentVolume;
+}
+
 function fillChapterSelect() {
-  $("chapterSelect").innerHTML = [...currentWork.chapters].sort((a, b) => a.index - b.index)
+  const list = chaptersOfVolume(currentVolume);
+  const pool = list.length ? list : currentWork.chapters;
+  $("chapterSelect").innerHTML = pool
     .map((c) => `<option value="${c.id}">${c.index}. ${esc(c.title)}${c.translations.length ? " ✓" : ""}${c.warnings ? " ⚠" : ""}</option>`).join("");
-  if (currentChapter) $("chapterSelect").value = currentChapter;
+  if (currentChapter && pool.some((c) => c.id === currentChapter)) $("chapterSelect").value = currentChapter;
+  else currentChapter = pool[0]?.id || null;
 }
 function fillLangSelect() {
   const opts = [...new Set([...currentWork.languages, "en", "es", "sv", "ja", "ko", "zh-CN"])].filter((l) => l !== currentWork.lang);
@@ -159,18 +209,22 @@ async function loadChapter() {
   currentChapter = $("chapterSelect").value;
   currentLang = $("langSelect").value;
   const ch = await API(`/api/works/${currentWork.id}/chapters/${currentChapter}?lang=${currentLang}`);
-  const body = ch.translation || "";
+  const vol = ch.chapter.volume ? esc(ch.chapter.volume) + " · " : "";
   $("readerMeta").innerHTML = ch.translation
-    ? `Translated to <strong>${esc(langName(currentLang))}</strong>${ch.record?.provider ? ` via ${esc(ch.record.provider)}` : ""} · available: ${ch.available.map(langName).join(", ") || "none"}`
-    : `Not translated to ${esc(langName(currentLang))} yet — press <em>Translate / ensure</em>. Available: ${ch.available.map(langName).join(", ") || "none"}`;
+    ? `${vol}Translated to <strong>${esc(langName(currentLang))}</strong>${ch.record?.provider ? ` via ${esc(ch.record.provider)}` : ""} · available: ${ch.available.map(langName).join(", ") || "none"}`
+    : `${vol}Not translated to ${esc(langName(currentLang))} yet — press <em>Translate / ensure</em>. Available: ${ch.available.map(langName).join(", ") || "none"}`;
   const warn = ch.record?.warnings || [];
   $("warnBox").classList.toggle("hidden", !warn.length);
   $("warnBox").innerHTML = warn.length ? `<strong>QA warnings for this chapter:</strong><ul>${warn.map((w) => `<li class="${w.severity}">${esc(w.detail)}${w.sample ? ` <code>${esc(w.sample)}</code>` : ""}</li>`).join("")}</ul>` : "";
-  renderReader(body, ch.original, ch.lang);
+  renderReader(ch.translation, ch.original, ch.lang);
   if (ch.translation || ch.original) {
     const progress = LS.get("progress", {});
-    progress[`${currentWork.id}/${currentChapter}/${currentLang}`] = { at: Date.now(), workId: currentWork.id, chapterId: currentChapter, lang: currentLang, title: `${currentWork.title} · ${ch.chapter.title}` };
+    progress[`${currentWork.id}/${currentChapter}/${currentLang}`] = {
+      at: Date.now(), workId: currentWork.id, chapterId: currentChapter, lang: currentLang,
+      title: `${currentWork.title} · ${ch.chapter.title}`,
+    };
     LS.set("progress", progress);
+    history.replaceState(null, "", `#/work/${currentWork.id}/chapter/${currentChapter}?lang=${currentLang}`);
   }
 }
 
@@ -189,6 +243,7 @@ function renderReader(translation, original, sourceLang) {
 
 $("chapterSelect").onchange = () => loadChapter();
 $("langSelect").onchange = () => loadChapter();
+$("volumeSelect").onchange = () => { currentVolume = $("volumeSelect").value; currentChapter = null; fillChapterSelect(); loadChapter(); };
 $("backToLibrary").onclick = () => (location.hash = "#/");
 $("showOriginal").onclick = async () => {
   const ch = await API(`/api/works/${currentWork.id}/chapters/${currentChapter}?lang=`);
@@ -209,18 +264,34 @@ $("shareChapter").onclick = async () => {
   const link = `${location.origin}/#/work/${currentWork.id}/chapter/${currentChapter}?lang=${currentLang}`;
   try { await navigator.clipboard.writeText(link); toast("Link copied: " + link, "ok"); } catch { prompt("Copy this link:", link); }
 };
+$("addToStory").onclick = () => {
+  const qs = new URLSearchParams({ title: currentWork.title, author: currentWork.author || "", url: currentWork.sourceUrl || "" });
+  if (currentWork.volumes?.length) qs.set("volume", currentWork.volumes.at(-1).label || "");
+  location.hash = "#/add?" + qs.toString();
+};
 
 $("prevChapter").onclick = () => navChapter(-1);
 $("nextChapter").onclick = () => navChapter(1);
 function navChapter(dir) {
-  const list = [...currentWork.chapters].sort((a, b) => a.index - b.index);
-  const i = list.findIndex((c) => c.id === $("chapterSelect").value);
-  const n = list[i + dir];
-  if (n) { $("chapterSelect").value = n.id; loadChapter(); window.scrollTo({ top: 0, behavior: "smooth" }); }
-  else toast(dir > 0 ? "Last chapter" : "First chapter");
+  const list = chaptersOfVolume(currentVolume);
+  const pool = list.length ? list : currentWork.chapters;
+  const i = pool.findIndex((c) => c.id === $("chapterSelect").value);
+  const n = pool[i + dir];
+  if (n) { $("chapterSelect").value = n.id; loadChapter(); window.scrollTo({ top: 0, behavior: "smooth" }); return; }
+  // step into the next/previous volume
+  const vols = workVolumes();
+  const vi = vols.findIndex((v) => v.key === currentVolume);
+  const nv = vols[vi + dir];
+  if (nv) {
+    currentVolume = nv.key;
+    if (!$("volumeWrap").classList.contains("hidden")) $("volumeSelect").value = nv.key;
+    const first = chaptersOfVolume(nv.key)[dir > 0 ? 0 : chaptersOfVolume(nv.key).length - 1];
+    if (first) { currentChapter = first.id; fillChapterSelect(); loadChapter(); window.scrollTo({ top: 0, behavior: "smooth" }); return; }
+  }
+  toast(dir > 0 ? "Last chapter" : "First chapter");
 }
 document.addEventListener("keydown", (e) => {
-  if (!document.getElementById("view-reader").classList.contains("active")) return;
+  if (!$("view-reader").classList.contains("active")) return;
   if (["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName)) return;
   if (e.key === "ArrowLeft") navChapter(-1);
   if (e.key === "ArrowRight") navChapter(1);
@@ -236,11 +307,24 @@ $("translateBtn").onclick = async () => {
     const r = await post(`/api/works/${currentWork.id}/chapters/${currentChapter}/translate`, { target: currentLang });
     toast(r.cached ? "Loaded from memory" : `Translated ${r.chunks} chunks via ${r.provider}`, r.qa?.ok === false ? "warn" : "ok");
     currentWork = await API("/api/works/" + currentWork.id);
-    fillChapterSelect();
+    fillVolumeSelect(); fillChapterSelect();
     await loadChapter();
     loadStats();
   } catch (e) { toast("Error: " + e.message, "error"); $("readerMeta").textContent = "Error: " + e.message; }
   finally { busy($("translateBtn"), false); }
+};
+
+$("translateAllBtn").onclick = async () => {
+  const missing = currentWork.chapters.filter((c) => !c.translations.includes(currentLang)).length;
+  if (!confirm(`Translate all ${currentWork.chapters.length} chapter(s) to ${langName(currentLang)}${missing ? ` (${missing} not done yet)` : " (already done — will fill gaps)"}?`)) return;
+  busy($("translateAllBtn"), true, `Translating 0/${currentWork.chapters.length}…`);
+  try {
+    const r = await post(`/api/works/${currentWork.id}/translate-all`, { target: currentLang });
+    toast(`Done: ${r.ok} chapter(s) translated${r.failed ? `, ${r.failed} failed` : ""}`, r.failed ? "warn" : "ok");
+    currentWork = await API("/api/works/" + currentWork.id);
+    fillChapterSelect(); await loadChapter(); loadStats();
+  } catch (e) { toast("Error: " + e.message, "error"); }
+  finally { busy($("translateAllBtn"), false); }
 };
 
 /* ------------------------------------------------------------- story settings */
@@ -324,25 +408,52 @@ $("importGlossFile").onchange = async () => {
 };
 
 /* ------------------------------------------------------------------ upload */
+async function prefillAdd(qs) {
+  const title = qs.get("title") || "";
+  const author = qs.get("author") || "";
+  const url = qs.get("url") || "";
+  const volume = qs.get("volume") || "";
+  if (title) $("title").value = title;
+  if (author) $("author").value = author;
+  if (url) $("sourceUrl").value = url;
+  if (volume) $("volume").value = volume;
+  if (!title && $("title").value) $("title").value = "";
+  updateUploadStats();
+}
+
 $("uploadFile").onchange = async () => {
   const f = $("uploadFile").files[0]; if (!f) return;
   busy($("uploadFile"), true, "Reading…");
   try {
     if (/\.epub$|\.html?$/i.test(f.name)) {
       const buf = await f.arrayBuffer();
-      const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
-      const parsed = await post("/api/parse-file", { name: f.name, dataBase64: b64 });
+      let bin = "";
+      const bytes = new Uint8Array(buf);
+      for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode(...bytes.subarray(i, i + 8192));
+      const parsed = await post("/api/parse-file", { name: f.name, dataBase64: btoa(bin) });
       $("uploadText").value = parsed.text;
       toast(`Parsed ${parsed.name}: ${parsed.chars} chars, ~${parsed.chapters} chapter(s)`, "ok");
     } else {
       $("uploadText").value = await f.text();
     }
+    if (!$("title").value && f.name) $("title").value = f.name.replace(/\.[a-z0-9]+$/i, "").replace(/[_-]+/g, " ").trim();
+    maybeDetectLanguage();
     updateUploadStats();
   } catch (e) { toast("File error: " + e.message, "error"); }
   finally { busy($("uploadFile"), false); }
 };
 
-$("uploadText").oninput = updateUploadStats;
+$("uploadText").oninput = () => { maybeDetectLanguage(); updateUploadStats(); };
+$("uploadText").onpaste = () => setTimeout(() => { maybeDetectLanguage(); updateUploadStats(); }, 0);
+
+function maybeDetectLanguage() {
+  if (!$("autoDetect").checked) return;
+  const text = $("uploadText").value;
+  if (text.trim().length < 20) return;
+  const guess = detectLang(text);
+  if (LANG.some((l) => l.code === guess)) $("sourceLang").value = guess;
+}
+
 function updateUploadStats() {
   const n = $("uploadText").value.length;
   $("uploadStats").textContent = n ? `${n.toLocaleString()} chars ≈ ${Math.max(1, Math.ceil(n / 1800))} chunks` : "";
@@ -351,33 +462,59 @@ function updateUploadStats() {
 $("previewSplit").onclick = async () => {
   const text = $("uploadText").value.trim();
   if (!text) return toast("Paste some text first", "warn");
-  const r = await post("/api/works/preview-split", { text });
-  $("splitPreview").innerHTML = `Detected <strong>${r.count}</strong> chapter(s): ` + r.chapters.map((c) => `<code>${esc(c.title || "(untitled)")}</code> (${c.chars})`).join(" · ");
+  const r = await post("/api/works/preview-split", { text, volume: $("volume").value });
+  const volText = r.volumes?.length ? `${r.volumes.length} volume(s) · ` : "";
+  $("splitPreview").innerHTML = `Detected <strong>${volText}${r.count} chapter(s)</strong>: ` +
+    r.chapters.slice(0, 30).map((c) => `<code>${esc(c.volume ? c.volume + " / " : "")}${esc(c.title || "(untitled)")}</code>`).join(" · ") +
+    (r.chapters.length > 30 ? ` …+${r.chapters.length - 30} more` : "");
 };
 
-$("saveChapter").onclick = async () => {
+async function saveChapters({ translate }) {
   const title = $("title").value.trim(), text = $("uploadText").value.trim();
-  if (!title || !text) return toast("Story title and chapter text are required", "warn");
-  const autoTranslateTo = [...document.querySelectorAll('#autoLangs input:checked')].map((i) => i.value);
+  if (!title || !text) { toast("Story title and chapter text are required", "warn"); return; }
+  const autoTranslateTo = translate ? [...document.querySelectorAll('#autoLangs input:checked')].map((i) => i.value) : [];
+  if (translate && !autoTranslateTo.length) { toast("Pick at least one language to translate into", "warn"); return; }
   const settings = { keepHonorifics: $("setHonorifics").checked, formality: $("setFormality").value, notes: $("setNotes").value };
-  busy($("saveChapter"), true, autoTranslateTo.length ? "Saving & translating…" : "Saving…");
+  const btn = translate ? $("saveTranslate") : $("saveOnly");
+  busy(btn, true, translate ? "Saving & translating…" : "Saving…");
   try {
-    const body = { title, author: $("author").value, sourceLang: $("sourceLang").value, sourceUrl: $("sourceUrl").value, autoTranslateTo, settings };
+    const body = {
+      title, author: $("author").value, sourceLang: $("sourceLang").value,
+      sourceUrl: $("sourceUrl").value, autoTranslateTo, settings, volume: $("volume").value,
+    };
     const r = $("autoSplit").checked
       ? await post("/api/works/bulk", { ...body, text })
-      : await post("/api/works", { ...body, text, chapterTitle: $("chapterIndexTitle")?.value || "" });
+      : await post("/api/works", { ...body, text, chapterTitle: $("chapterTitle").value });
     const bits = [];
-    if (r.chapters) bits.push(`Saved ${r.chapters.filter((c) => c.created).length} new chapter(s)${r.chapters.some((c) => c.duplicate) ? `, ${r.chapters.filter((c) => c.duplicate).length} already existed` : ""}${r.chapters.some((c) => c.version) ? `, ${r.chapters.filter((c) => c.version).length} updated (old version kept)` : ""}.`);
-    else bits.push(r.duplicate ? "Already in the library (same text)." : r.version ? "Saved as a new version." : "Chapter saved.");
+    if (r.chapters) {
+      const added = r.chapters.filter((c) => c.created).length;
+      const dups = r.chapters.filter((c) => c.duplicate).length;
+      const vers = r.chapters.filter((c) => c.version).length;
+      const vols = [...new Set(r.chapters.map((c) => c.volume).filter(Boolean))];
+      bits.push(`Saved ${added} new chapter(s)${vols.length ? ` in ${vols.length} volume(s)` : ""}${dups ? `, ${dups} already existed` : ""}${vers ? `, ${vers} updated (old versions kept)` : ""}.`);
+    } else {
+      bits.push(r.duplicate ? "Already in the library (same text)." : r.version ? "Saved as a new version." : "Chapter saved.");
+    }
     if (r.termsAdded) bits.push(`${r.termsAdded} terms recorded.`);
-    if (r.translated?.length) bits.push(`Translated: ${typeof r.translated[0] === "string" ? r.translated.length + " item(s)" : r.translated.map(langName).join(", ")}.`);
+    if (translate && r.translated?.length) bits.push(`Translation done: ${r.translated.length} item(s).`);
     if (r.translateError) bits.push("Translation issue: " + r.translateError);
     $("uploadResult").innerHTML = bits.join(" ") + ` <a href="#/work/${r.workId}">Open story →</a>`;
     toast("Saved", "ok");
     loadStats();
+    if (translate) { clearAddForm(); location.hash = `#/work/${r.workId}`; }
   } catch (e) { toast("Error: " + e.message, "error"); $("uploadResult").textContent = "Error: " + e.message; }
-  finally { busy($("saveChapter"), false); }
-};
+  finally { busy(btn, false); }
+}
+$("saveTranslate").onclick = () => saveChapters({ translate: true });
+$("saveOnly").onclick = () => saveChapters({ translate: false });
+
+function clearAddForm() {
+  $("uploadText").value = "";
+  $("chapterTitle").value = "";
+  $("splitPreview").innerHTML = "";
+  $("uploadResult").innerHTML = "";
+  updateUploadStats();
+}
 
 /* --------------------------------------------------------------- activity */
 async function loadActivity() {
@@ -391,18 +528,23 @@ async function loadActivity() {
 $("swap").onclick = () => { if ($("source").value === "auto") return; const s = $("source").value; $("source").value = $("target").value; $("target").value = s; };
 $("go").onclick = async () => {
   const t = $("input").value.trim(); if (!t) return toast("Paste some text first", "warn");
-  const engine = document.querySelector('input[name="engine"]:checked').value;
   busy($("go"), true, "Translating…");
   try {
-    const r = await post("/api/translate", { text: t, source: $("source").value, target: $("target").value, engine: engine === "ai" ? "ai" : "free", chain: engine === "ai" ? "auto" : undefined });
+    const r = await post("/api/translate", { text: t, source: $("source").value, target: $("target").value, chain: "auto" });
     $("output").value = r.translation;
-    $("progress").textContent = `${r.chunks} chunks · via ${r.provider || r.engine}`;
+    $("progress").textContent = `${r.chunks} chunks · via ${r.provider || "model"}`;
   } catch (e) { toast("Error: " + e.message, "error"); $("progress").textContent = "Error: " + e.message; }
   finally { busy($("go"), false); }
 };
 
 /* ---------------------------------------------------------- backup/restore */
 $("exportAll").onclick = () => window.open("/api/export", "_blank");
+$("reloadStore").onclick = async () => {
+  busy($("reloadStore"), true, "Reloading…");
+  try { await post("/api/reload", {}); toast("Reloaded from storage", "ok"); loadStats(); loadHealth(); }
+  catch (e) { toast("Error: " + e.message, "error"); }
+  finally { busy($("reloadStore"), false); }
+};
 $("importAllFile").onchange = async () => {
   const f = $("importAllFile").files[0]; if (!f) return;
   busy($("importAllFile"), true, "Importing…");
@@ -418,14 +560,13 @@ $("importAllFile").onchange = async () => {
 
 /* ------------------------------------------------------------- reader prefs */
 function applyPrefs() {
-  const p = readerPrefs;
-  $("fontSize").value = p.fontSize;
-  $("theme").value = p.theme;
-  $("readerBody").style.fontSize = p.fontSize + "px";
-  $("readerBody2").style.fontSize = p.fontSize + "px";
-  document.documentElement.dataset.theme = p.theme === "auto" ? "" : p.theme;
-  $("readerPane").classList.toggle("split", !!p.split);
-  $("splitView").classList.toggle("on", !!p.split);
+  $("fontSize").value = readerPrefs.fontSize;
+  $("theme").value = readerPrefs.theme;
+  $("readerBody").style.fontSize = readerPrefs.fontSize + "px";
+  $("readerBody2").style.fontSize = readerPrefs.fontSize + "px";
+  document.documentElement.dataset.theme = readerPrefs.theme === "auto" ? "" : readerPrefs.theme;
+  $("readerPane").classList.toggle("split", !!readerPrefs.split);
+  $("splitView").classList.toggle("on", !!readerPrefs.split);
 }
 $("fontSize").oninput = () => { readerPrefs.fontSize = +$("fontSize").value; LS.set("prefs", readerPrefs); applyPrefs(); };
 $("theme").onchange = () => { readerPrefs.theme = $("theme").value; LS.set("prefs", readerPrefs); applyPrefs(); };

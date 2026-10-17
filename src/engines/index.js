@@ -1,11 +1,10 @@
 // Orchestrator: chunk -> translate sequentially (continuity) -> rejoin.
-// Engine "ai" accepts a single provider config or a fallback chain
-// (e.g. groq -> cerebras -> pollinations): each chunk tries providers in order.
+// One quality-first chain: Groq primary, Gemini extreme backup. There is no
+// keyless MT path — if neither model is available we fail loudly and ask for a
+// fresh key instead of shipping a worse translation.
 import { chunkNovel, joinChunks, normalizeText } from "../chunker.js";
-import { protectTerms } from "../glossary.js";
-import { translateFree } from "./freeEngine.js";
 import { translateAiChunk, resolveAiConfig } from "./aiEngine.js";
-import { parseChain, expandAuto, resolveProvider } from "./providers.js";
+import { parseChain, expandAuto } from "./providers.js";
 
 function resolveChain({ ai = {}, chain }) {
   let specs = chain ?? ai.chain ?? ai.chainSpec;
@@ -14,84 +13,60 @@ function resolveChain({ ai = {}, chain }) {
   specs = expandAuto(specs);
   if (specs.length) {
     return specs.map((s) => {
-      if (typeof s === "string") return { kind: "ai", spec: { provider: s } };
-      if (s.provider === "free") return { kind: "free" };
-      if (s.provider === "custom" || !s.provider) return { kind: "ai", spec: { ...ai, provider: "custom" } };
+      if (typeof s === "string") return { spec: { provider: s } };
       return {
-        kind: "ai",
         spec: {
-          provider: s.provider,
+          provider: s.provider || "custom",
           model: s.model || (ai.provider === s.provider ? ai.model : undefined),
-          apiKey: s.apiKey || ai.apiKey, // explicit/shared key, else per-provider env var
+          apiKey: s.apiKey || ai.apiKey,
           baseUrl: s.baseUrl,
         },
       };
     });
   }
-  return [{ kind: "ai", spec: ai }]; // single-provider path
+  return [{ spec: ai }]; // single-provider path
 }
 
 export async function translateText(
   text,
-  {
-    source = "auto",
-    target = "en",
-    engine = "free",
-    maxChunk = 1800,
-    keepHonorifics = true,
-    formality = "match",
-    glossary = [],
-    ai = {},
-    chain,
-    fetchFn = fetch,
-    onProgress,
-  } = {}
+  { source = "auto", target = "en", engine = "ai", maxChunk = 1800, keepHonorifics = true, formality = "match", glossary = [], notes = "", ai = {}, chain, fetchFn = fetch, onProgress } = {}
 ) {
   const norm = normalizeText(text);
-  if (!norm) return { translation: "", chunks: 0, engine };
+  if (!norm) return { translation: "", chunks: 0, engine, provider: null };
   if (source === target) throw new Error("Source and target languages are the same.");
   const chunks = chunkNovel(norm, maxChunk);
+  const legs = resolveChain({ ai, chain });
   const out = [];
-  const aiChain = engine === "ai" ? resolveChain({ ai, chain }) : [];
   let usedProvider = null;
   const attempts = [];
 
   for (let i = 0; i < chunks.length; i++) {
-    const chunk = chunks[i];
+    const prevTail = out.length ? out[out.length - 1].slice(-500) : "";
+    const errors = [];
     let translated;
-    if (engine === "ai") {
-      const prevTail = out.length ? out[out.length - 1].slice(-500) : "";
-      const errors = [];
-      for (const leg of aiChain) {
-        const legName = leg.kind === "free" ? "free-mt" : `${leg.spec.provider || "custom"}${leg.spec.model ? "/" + leg.spec.model : ""}`;
-        try {
-          if (leg.kind === "free") {
-            const { text: guarded, restore } = protectTerms(chunk, glossary);
-            translated = restore(await translateFree(guarded, { source, target, fetchFn }));
-            usedProvider = "free-mt";
-          } else {
-            // Resolved lazily so legs with no key are skipped, not fatal.
-            const config = resolveAiConfig(leg.spec);
-            translated = await translateAiChunk(chunk, {
-              source, target, keepHonorifics, formality, glossary, prevTail, config, fetchFn,
-            });
-            usedProvider = `${config.provider}/${config.model}`;
-          }
-          if (i === 0) attempts.push({ provider: legName, ok: true });
-          break;
-        } catch (e) {
-          if (i === 0) attempts.push({ provider: legName, ok: false, error: e.message.slice(0, 160) });
-          errors.push(e.message);
-        }
+    for (const leg of legs) {
+      const legName = `${leg.spec.provider || "custom"}${leg.spec.model ? "/" + leg.spec.model : ""}`;
+      try {
+        const config = resolveAiConfig(leg.spec);
+        translated = await translateAiChunk(chunks[i], {
+          source, target, keepHonorifics, formality, glossary, notes, prevTail, config, fetchFn,
+        });
+        usedProvider = `${config.provider}/${config.model}`;
+        if (i === 0) attempts.push({ provider: legName, ok: true });
+        break;
+      } catch (e) {
+        if (i === 0) attempts.push({ provider: legName, ok: false, error: e.message.slice(0, 160) });
+        errors.push(e.message);
       }
-      if (translated === undefined) throw new Error("All providers failed: " + errors.join(" | "));
-    } else {
-      // Free MT follows no instructions, so enforce glossary via placeholder protection.
-      const { text: guarded, restore } = protectTerms(chunk, glossary);
-      translated = restore(await translateFree(guarded, { source, target, fetchFn }));
+    }
+    if (translated === undefined) {
+      throw new Error(
+        "All models failed: " + errors.join(" | ") +
+        ". Add a fresh key (Groq free tier: console.groq.com) and retry — nothing was saved."
+      );
     }
     out.push(translated.trim());
     onProgress?.({ done: i + 1, total: chunks.length });
   }
-  return { translation: joinChunks(out), chunks: chunks.length, engine, provider: usedProvider, attempts };
+  return { translation: joinChunks(out), chunks: chunks.length, engine: "ai", provider: usedProvider, attempts };
 }

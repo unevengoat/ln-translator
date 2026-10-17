@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // CLI: batch-translate chapter files. Example:
-//   node src/cli.js --in ch1.txt --from ja --to en --engine free
-//   node src/cli.js --in ch1.txt --from ja --to en --engine ai --key sk-... --model gpt-4o-mini
-//   node src/cli.js --in ./chapters --from zh-CN --to en --engine free --keep-honorifics
+//   node src/cli.js --in ch1.txt --from ja --to en
+//   node src/cli.js --in ch1.txt --from ja --to sv --provider groq --model openai/gpt-oss-120b
+//   node src/cli.js --in ./chapters --from zh-CN --to es --keep-honorifics
 import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { translateText } from "./engines/index.js";
@@ -23,9 +23,8 @@ Required:
 Options:
   --from <code>      Source language (default: auto)
   --out <path>       Output file/dir (default: <input>.<to>.txt next to input)
-  --engine <e>       free | ai  (default: free)
-  --provider <p>     AI provider: groq | cerebras | gemini | openrouter | mistral |
-                     nvidia | pollinations | custom (default: custom)
+  --provider <p>     AI provider: groq | gemini | openrouter | mistral | nvidia |
+                     pollinations | custom (default: quality chain groq → gemini)
   --chain <list>     Fallback chain, e.g. "groq,cerebras,pollinations"
                      (per-provider keys come from env; optional :model per item)
   --key <key>        AI API key (or <PROVIDER>_API_KEY env)
@@ -34,12 +33,12 @@ Options:
   --glossary <path>  JSON/TXT glossary file ("source=target" per line, or JSON)
   --max-chunk <n>    Max chars per chunk (default: 1800)
   --keep-honorifics  Keep -san/-sama etc. (default: on; use --no-keep-honorifics to drop)
-  --formality <f>    match | formal | casual (AI engine, default: match)
+  --formality <f>    match | formal | casual (default: match)
   --help             Show this help
 `;
 
 function args(argv) {
-  const o = { from: "auto", engine: "free", "max-chunk": "1800", "keep-honorifics": true, formality: "match" };
+  const o = { from: "auto", "max-chunk": "1800", "keep-honorifics": true, formality: "match" };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") return { help: true };
@@ -77,8 +76,8 @@ async function main() {
     console.log(HELP);
     process.exit(o.help ? 0 : 1);
   }
-  // AI engine with no provider options = benchmarked auto chain (server/env keys + MT fallback).
-  if (o.engine === "ai" && !o.provider && !o.model && !o.key && !o.chain && !o["base-url"]) o.chain = "auto";
+  // No provider options = quality chain (groq → gemini) using env keys.
+  if (!o.provider && !o.model && !o.key && !o.chain && !o["base-url"]) o.chain = "auto";
   const t0 = Date.now();
   const glossary = await loadGlossary(o.glossary);
   const inputs = await collectInputs(o.in);
@@ -92,7 +91,7 @@ async function main() {
     process.stdout.write(`[${++n}/${inputs.length}] ${input} -> ${out} ... `);
     const text = await readInput(input);
     const { translation, chunks, provider, attempts } = await translateText(text, {
-      source: o.from, target: o.to, engine: o.engine,
+      source: o.from, target: o.to, engine: "ai",
       maxChunk: parseInt(o["max-chunk"], 10) || 1800,
       keepHonorifics: o["keep-honorifics"] !== false && o["keep-honorifics"] !== "false",
       formality: o.formality,

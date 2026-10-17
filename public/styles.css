@@ -33,6 +33,9 @@ label:has(textarea) { display: grid; }
 button, .file { cursor: pointer; background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 0.5rem 1rem; font: inherit; }
 #backToLibrary, #showOriginal, #splitView, #copyChapter, #dlChapter, #shareChapter, #prevChapter, #nextChapter, .edit, #storySettingsBtn, #exportGloss, #acceptSuggestions, #previewSplit { background: transparent; color: var(--accent); border: 1px solid var(--accent); padding: 0.3rem 0.8rem; }
 #splitView.on { background: var(--accent); color: #fff; }
+#saveOnly, #gotoAdd, #addToStory { background: transparent; color: var(--accent); border: 1px solid var(--accent); padding: 0.4rem 0.9rem; }
+button.primary { font-weight: 600; }
+.warn-text { color: #b45309; }
 button:disabled { opacity: 0.6; cursor: wait; }
 .hint { opacity: 0.78; font-size: 0.85rem; font-family: system-ui, sans-serif; }
 .hidden { display: none !important; }

@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LN Translator — Light Novel &amp; Web Novel Library</title>
-<meta name="description" content="Translate and read light novels / web novels with consistent names across every chapter. Free, shared library.">
+<meta name="description" content="Translate and read light novels / web novels with consistent names across every chapter and volume. Free, shared library.">
 <meta property="og:title" content="LN Translator — Light Novel Library">
-<meta property="og:description" content="Shared, consistent light novel translations. Add a chapter once; everyone can read it in any language.">
+<meta property="og:description" content="Shared, consistent light novel translations. Add a chapter or a whole volume once; everyone can read it in any language.">
 <meta property="og:type" content="website">
 <link rel="manifest" href="/manifest.webmanifest">
 <meta name="theme-color" content="#b3541e">
@@ -16,10 +16,10 @@
 <body>
 <header>
   <h1><a href="#/">LN Translator</a></h1>
-  <p>Translate &amp; keep light novels / web novels — consistent names, any language, shared library.</p>
+  <p>Translate &amp; keep light novels / web novels — volumes, chapters, consistent names, any language.</p>
   <nav>
     <button data-route="#/">Library</button>
-    <button data-route="#/add">Add chapters</button>
+    <button data-route="#/add">Add</button>
     <button data-route="#/activity">Activity</button>
     <button data-route="#/quick">Quick translate</button>
     <button data-route="#/about">About</button>
@@ -33,6 +33,7 @@
       <div class="row">
         <label class="grow">Search <input id="search" placeholder="title, author, language…"></label>
         <button id="searchGo" type="button">Search</button>
+        <button id="gotoAdd" type="button">＋ Add chapters / volumes</button>
       </div>
       <div id="globalStats" class="hint"></div>
       <div id="continueWrap" class="hidden">
@@ -47,27 +48,37 @@
   <!-- ------------------------------------------------------------- add -->
   <section id="view-add" class="view">
     <div class="card">
-      <h2>Add chapters <small class="hint">— saved once, reused forever</small></h2>
+      <h2>Add chapters or a whole volume <small class="hint">— saved once, translated once, reused forever</small></h2>
       <div class="row">
         <label>Story title <input id="title" placeholder="e.g. Mushoku Tensei"></label>
         <label>Author <input id="author" placeholder="optional"></label>
+        <label>Source language <select id="sourceLang"></select></label>
       </div>
       <div class="row">
-        <label>Source language <select id="sourceLang"></select></label>
+        <label>Volume (optional) <input id="volume" placeholder="e.g. Volume 1 / 第1巻"></label>
+        <label>Chapter title (optional) <input id="chapterTitle" placeholder="auto from markers"></label>
         <label>Source URL <input id="sourceUrl" placeholder="optional — links re-uploads to the same story"></label>
       </div>
       <div class="row">
         <label class="file">📄 Load file (.txt/.md/.html/.epub) <input id="uploadFile" type="file" accept=".txt,.md,.markdown,.html,.htm,.epub" hidden></label>
-        <label class="engine"><input type="checkbox" id="autoSplit" checked> Split into chapters automatically</label>
+        <label class="engine"><input type="checkbox" id="autoSplit" checked> Auto-split volumes &amp; chapters</label>
+        <label class="engine"><input type="checkbox" id="autoDetect" checked> Auto-detect language</label>
         <span id="uploadStats" class="hint"></span>
       </div>
-      <label>Chapter text (paste one or many chapters)
-        <textarea id="uploadText" rows="12" placeholder="Paste a chapter, or a whole volume — chapter markers like &quot;Chapter 1&quot; or &quot;第1話&quot; are detected."></textarea>
+      <label>Text
+        <textarea id="uploadText" rows="12" placeholder="Paste a chapter, or a whole volume. Markers like &quot;Volume 1&quot;, &quot;Chapter 2&quot;, &quot;第1巻&quot;, &quot;第2話&quot; are detected automatically."></textarea>
       </label>
       <div class="row">
-        <span class="hint">Translate into right away:</span>
+        <button id="previewSplit" type="button">Preview split</button>
+        <span class="hint">Then translate into:</span>
         <span id="autoLangs" class="chips"></span>
       </div>
+      <div id="splitPreview" class="hint"></div>
+      <div class="row">
+        <button id="saveTranslate" class="primary">Save &amp; translate</button>
+        <button id="saveOnly" type="button">Save only</button>
+      </div>
+      <div id="uploadResult" class="hint"></div>
       <details>
         <summary>Story style (applies to every chapter of this story)</summary>
         <div class="row">
@@ -78,12 +89,6 @@
           <textarea id="setNotes" rows="2" placeholder="e.g. Kirito is cold and terse; keep skill names in English."></textarea>
         </label>
       </details>
-      <div class="row">
-        <button id="previewSplit" type="button">Preview split</button>
-        <button id="saveChapter">Save chapter(s)</button>
-      </div>
-      <div id="splitPreview" class="hint"></div>
-      <div id="uploadResult" class="hint"></div>
     </div>
   </section>
 
@@ -93,14 +98,17 @@
       <div class="row">
         <button id="backToLibrary" type="button">← Library</button>
         <h2 id="readerTitle"></h2>
+        <button id="addToStory" type="button">＋ Add to this story</button>
         <button id="storySettingsBtn" type="button">Story settings</button>
       </div>
       <div class="row">
         <button id="prevChapter" type="button">‹ Prev</button>
+        <label id="volumeWrap" class="hidden">Volume <select id="volumeSelect"></select></label>
         <label>Chapter <select id="chapterSelect"></select></label>
         <button id="nextChapter" type="button">Next ›</button>
         <label>Language <select id="langSelect"></select></label>
         <button id="translateBtn" type="button">Translate / ensure</button>
+        <button id="translateAllBtn" type="button">Translate whole story</button>
       </div>
       <div class="row">
         <button id="showOriginal" type="button">Original</button>
@@ -118,7 +126,7 @@
         <article id="readerBody2" class="reader hidden"></article>
       </div>
       <div class="row">
-        <span class="hint">Shortcuts: ← / → chapters · t translation · o original · s side-by-side</span>
+        <span class="hint">Shortcuts: ← / → chapters · t translate · o original · s side-by-side</span>
       </div>
     </div>
 
@@ -155,14 +163,11 @@
   <!-- ----------------------------------------------------- quick translate -->
   <section id="view-quick" class="view">
     <div class="card">
+      <h2>Quick translate <small class="hint">— nothing saved, just text in / text out (Groq → Gemini)</small></h2>
       <div class="row">
         <label>Source <select id="source"></select></label>
         <button id="swap" type="button">⇄</button>
         <label>Target <select id="target"></select></label>
-      </div>
-      <div class="row">
-        <label class="engine"><input type="radio" name="engine" value="ai" checked> AI (Groq → Gemini backup)</label>
-        <label class="engine"><input type="radio" name="engine" value="free"> Free MT (no key)</label>
       </div>
       <label>Text <textarea id="input" rows="8"></textarea></label>
       <button id="go">Translate</button>
@@ -176,9 +181,12 @@
     <div class="card">
       <h2>About this library</h2>
       <div id="healthBox" class="hint"></div>
-      <h2>Storage &amp; backups</h2>
-      <p class="hint">The library is stored durably outside the app container. Export a full backup any time, and import one to restore or merge.</p>
+      <div id="tokenBox" class="hint"></div>
+      <h2>Storage &amp; updates</h2>
+      <p class="hint">The library lives outside the app container (durable storage), so redeploys and idle sleep never lose data.
+        Saves are written immediately. If you edit storage by hand, this instance picks it up within ~2 minutes, or press reload.</p>
       <div class="row">
+        <button id="reloadStore" type="button">Reload library from storage</button>
         <button id="exportAll" type="button">Export everything (JSON)</button>
         <label class="file">📄 Import backup <input id="importAllFile" type="file" accept=".json" hidden></label>
       </div>

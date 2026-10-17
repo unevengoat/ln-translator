@@ -74,6 +74,13 @@ export class S3Client {
     return res.ok;
   }
 
+  /** HEAD returning the ETag (used as a cheap change-detection revision). */
+  async head(key) {
+    const res = await this.request("HEAD", key);
+    if (!res.ok) return null;
+    return { ok: true, etag: res.headers?.get?.("etag") || null, size: Number(res.headers?.get?.("content-length") || 0) };
+  }
+
   async delete(key) {
     const res = await this.request("DELETE", key);
     if (!res.ok && res.status !== 404) throw new Error(`R2 DELETE ${key} → ${res.status}`);
