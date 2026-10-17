@@ -25,7 +25,10 @@ in on of to up down out over under again more most some such only own same than 
 should could would may might must shall do does did done have has had having be been being am is are was were
 about after before during into through between against without within along across behind beyond
 thank thanks note notes page pages sign visit us or exclusive content
-mister missus lord lady king queen prince princess saint sir madam`.split(/\s+/).filter(Boolean));
+mister missus lord lady king queen prince princess saint sir madam
+names name cover covers translation translated translations copyright vol vols volume volumes chapter chapters
+part parts book books page number numbers edition press newsletter link links subscribe bonus content
+mister madam sir novel novels author authors series story stories`.split(/\s+/).filter(Boolean));
 
 /** Cheap candidates (no model call): katakana runs + Latin names. */
 export function extractCandidates(text, cap = 120) {
@@ -141,6 +144,27 @@ export function termCounts(terms) {
   const out = {};
   for (const t of Object.values(terms)) for (const lang of Object.keys(t.langs || {})) out[lang] = (out[lang] || 0) + 1;
   return out;
+}
+
+/**
+ * Remove auto-discovered noise (common words wrongly captured as names) from a
+ * term table, keeping every user-made term and anything with variants.
+ */
+export function cleanNoisyTerms(terms) {
+  const removed = [];
+  for (const [source, term] of Object.entries(terms)) {
+    const auto = term.origin !== "user" && Object.values(term.langs || {}).every((l) => l.origin !== "user");
+    const hasVariants = Object.values(term.langs || {}).some((l) => (l.variants || []).length);
+    const canonicalSame = Object.values(term.langs || {}).every((l) => l.canonical === source);
+    const short = source.length < 3;
+    const stop = STOPWORDS.has(source.toLowerCase().trim());
+    const looksLikeProse = source.split(/\s+/).length >= 4;
+    if (auto && !hasVariants && (short || stop || (canonicalSame && looksLikeProse))) {
+      delete terms[source];
+      removed.push(source);
+    }
+  }
+  return removed;
 }
 
 /* ---- bulk import/export (CSV or JSON) ---- */

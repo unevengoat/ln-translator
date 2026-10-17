@@ -74,7 +74,8 @@ function paced(fn) {
 }
 
 /** One model call with exponential backoff + jitter, honouring Retry-After. */
-async function callWithRetry(fn, { attempts = 4, baseMs = 1500 } = {}) {
+async function callWithRetry(fn, { attempts = 6, baseMs } = {}) {
+  const base = baseMs ?? Number(process.env.AI_RETRY_BASE_MS ?? 2000);
   let lastErr;
   for (let i = 0; i < attempts; i++) {
     try {
@@ -83,7 +84,7 @@ async function callWithRetry(fn, { attempts = 4, baseMs = 1500 } = {}) {
       lastErr = e;
       if (!isTransient(e.message) || i === attempts - 1) throw e;
       const asked = retryAfterMs(e.message);
-      const backoff = Math.max(asked, baseMs * 2 ** i) + Math.floor(Math.random() * 400);
+      const backoff = Math.max(asked, base * 2 ** i) + Math.floor(Math.random() * 400);
       await sleep(backoff);
     }
   }

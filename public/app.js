@@ -456,6 +456,17 @@ $("acceptSuggestions").onclick = async () => {
   finally { busy($("acceptSuggestions"), false); }
 };
 
+$("cleanTerms").onclick = async () => {
+  if (!confirm("Remove auto-discovered noise from this story's term table? Your own terms are kept.")) return;
+  busy($("cleanTerms"), true, "Cleaning…");
+  try {
+    const r = await post(`/api/works/${currentWork.id}/terms/clean`, {});
+    toast(`Removed ${r.removed} noisy term(s) (${r.before} → ${r.after})`, "ok");
+    await loadTerms(); await loadChapter();
+  } catch (e) { toast("Error: " + e.message, "error"); }
+  finally { busy($("cleanTerms"), false); }
+};
+
 $("exportGloss").onclick = () => window.open(`/api/works/${currentWork.id}/glossary?lang=${currentLang}&format=csv`, "_blank");
 $("importGlossPaste").onclick = async () => {
   const data = $("glossImport").value.trim();

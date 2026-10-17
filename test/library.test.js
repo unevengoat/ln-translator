@@ -2,6 +2,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 // Tests stub the network, so no need to pace calls like production does.
 process.env.AI_MIN_INTERVAL_MS = "0";
+process.env.AI_RETRY_BASE_MS = "5";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -11,7 +12,7 @@ import {
   listWorks, getWork, getChapter, stats, searchLibrary, activityFeed, updateWork,
   deleteChapter, deleteWork, restoreVersion, suggestTerms, importGlossary, exportGlossary, parseTermInput,
 } from "../src/library.js";
-import { mergeTerms, termsGlossary, canonicalFor, extractCandidates, termsToCsv, termCounts } from "../src/terms.js";
+import { mergeTerms, termsGlossary, canonicalFor, extractCandidates, termsToCsv, termCounts, latinCandidates, cleanNoisyTerms } from "../src/terms.js";
 import { lintTranslation, summarizeWarnings, normalizeDifficulty, cleanTranslationArtifacts, DIFFICULTIES } from "../src/qa.js";
 import { isModelGone, pickCandidates, translateWithPolicy } from "../src/engines/models.js";
 
@@ -303,6 +304,28 @@ describe("terms", () => {
     assert.equal(termsGlossary(terms, "sv")[0].target, "Kirito");
     assert.deepEqual(termCounts(terms), { en: 1, sv: 1 });
   });
+  it("drops common words but keeps real names", () => {
+    const text = "Cid walked. Cid ran. Shadow Garden watched. The group met Alpha and Alpha nodded. Copyright page. He said names of the Vol.";
+    const c = latinCandidates(text);
+    assert.ok(c.includes("Cid"), "repeated short name kept");
+    assert.ok(c.includes("Shadow Garden"), "multi-word name kept");
+    assert.ok(c.includes("Alpha"), "repeated name kept");
+    assert.ok(!c.some((x) => /^copyright$/i.test(x)), "common word dropped");
+    assert.ok(!c.some((x) => /^names$/i.test(x)), "common word dropped");
+    assert.ok(!c.some((x) => /^vol\.?$/i.test(x)), "abbreviation dropped");
+  });
+
+  it("cleans noisy terms from a table without touching user terms", () => {
+    const terms = {};
+    mergeTerms(terms, "en", [{ source: "Copyright", translation: "Copyright" }, { source: "Cid", translation: "Cid" }]);
+    terms["Copyright"].langs.en.variants = [];
+    terms["キリト"] = { source: "キリト", origin: "user", langs: { en: { canonical: "Keith", variants: [], origin: "user" } } };
+    const removed = cleanNoisyTerms(terms);
+    assert.deepEqual(removed, ["Copyright"]);
+    assert.ok(terms.Cid, "real name kept");
+    assert.ok(terms["キリト"], "user term kept");
+  });
+
   it("extracts candidates and exports CSV", () => {
     const c = extractCandidates("キリト met Asuna in Tokyo.");
     assert.ok(c.includes("キリト") && c.includes("Asuna") && c.includes("Tokyo"));

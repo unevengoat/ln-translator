@@ -8,7 +8,7 @@ import { translateWithPolicy, PRIMARY } from "./engines/models.js";
 import { resolveProvider } from "./engines/providers.js";
 import {
   termsGlossary, mergeTerms, extractTermsWithModel, latinCandidates, termForms,
-  termCounts, termsToCsv, parseCsv, parseGlossary,
+  termCounts, termsToCsv, parseCsv, parseGlossary, cleanNoisyTerms,
 } from "./terms.js";
 import { lintTranslation, summarizeWarnings, cleanTranslationArtifacts, normalizeDifficulty, DEFAULT_DIFFICULTY, DIFFICULTIES } from "./qa.js";
 
@@ -705,4 +705,19 @@ export async function exportGlossary(store, { workId, lang, format = "csv" }) {
   const terms = await store.loadTerms(workId);
   if (format === "json") return JSON.stringify(termsToCsv(terms, lang) ? Object.fromEntries(Object.values(terms).filter((t) => t.langs?.[lang]?.canonical).map((t) => [t.source, t.langs[lang].canonical])) : {}, null, 2);
   return termsToCsv(terms, lang);
+}
+
+/** Maintenance: drop auto-discovered noise from a story's term table. */
+export async function cleanTerms(store, { workId } = {}) {
+  const terms = await store.loadTerms(workId);
+  const before = Object.keys(terms).length;
+  const removed = cleanNoisyTerms(terms);
+  store.saveTerms(workId, terms);
+  await store.update((d) => {
+    const w = d.works[workId];
+    if (w) { w.terms = termCounts(terms); w.updatedAt = Date.now(); }
+    logActivity(d, { type: "terms-cleaned", workId, detail: `${removed.length} noisy term(s) removed` });
+  });
+  await store.flush();
+  return { before, after: Object.keys(terms).length, removed: removed.length, sample: removed.slice(0, 15) };
 }
