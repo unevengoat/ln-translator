@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LN Translator — Light Novel & Web Novel Library</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <h1>LN Translator</h1>
+  <p>Translate &amp; keep light novels / web novels — consistent names, any language, shared library.</p>
+  <nav>
+    <button data-tab="library" class="active">Library</button>
+    <button data-tab="upload">Add chapter</button>
+    <button data-tab="quick">Quick translate</button>
+  </nav>
+</header>
+<main>
+
+  <section id="tab-library" class="tab active">
+    <div class="card">
+      <div class="row">
+        <label>Search <input id="search" placeholder="title, author or language"></label>
+        <span id="globalStats" class="hint"></span>
+      </div>
+      <div id="works" class="works"></div>
+    </div>
+  </section>
+
+  <section id="tab-upload" class="tab">
+    <div class="card">
+      <h2>Add a chapter <small class="hint">— saved once, reused forever</small></h2>
+      <div class="row">
+        <label>Story title <input id="title" placeholder="e.g. Mushoku Tensei"></label>
+        <label>Author <input id="author" placeholder="optional"></label>
+      </div>
+      <div class="row">
+        <label>Source language <select id="sourceLang"></select></label>
+        <label>Chapter title/number <input id="chapterTitle" placeholder="Chapter 1"></label>
+        <label>Chapter # <input id="chapterIndex" type="number" min="1" placeholder="auto"></label>
+        <label>Source URL <input id="sourceUrl" placeholder="optional — links re-uploads to the same story"></label>
+      </div>
+      <label>Chapter text
+        <textarea id="uploadText" rows="10" placeholder="Paste the chapter…"></textarea>
+      </label>
+      <div class="row">
+        <label class="file">📄 Load file <input id="uploadFile" type="file" accept=".txt,.md,.markdown,.html,.htm" hidden></label>
+        <span id="uploadStats" class="hint"></span>
+      </div>
+      <div class="row">
+        <span class="hint">Translate into right away:</span>
+        <span id="autoLangs" class="chips"></span>
+      </div>
+      <button id="saveChapter">Save chapter</button>
+      <div id="uploadResult" class="hint"></div>
+    </div>
+  </section>
+
+  <section id="tab-quick" class="tab">
+    <div class="card">
+      <div class="row">
+        <label>Source <select id="source"></select></label>
+        <button id="swap" type="button">⇄</button>
+        <label>Target <select id="target"></select></label>
+      </div>
+      <div class="row">
+        <label class="engine"><input type="radio" name="engine" value="ai" checked> AI (Groq → Gemini backup)</label>
+        <label class="engine"><input type="radio" name="engine" value="free"> Free MT (no key)</label>
+        <span id="engineHint" class="hint"></span>
+      </div>
+      <label>Text <textarea id="input" rows="10" placeholder="Paste text…"></textarea></label>
+      <button id="go">Translate</button>
+      <div id="progress" class="hint"></div>
+      <label>Result <textarea id="output" rows="12" readonly></textarea></label>
+    </div>
+  </section>
+
+  <section id="tab-reader" class="tab">
+    <div class="card">
+      <div class="row">
+        <button id="backToLibrary" type="button">← Library</button>
+        <h2 id="readerTitle"></h2>
+      </div>
+      <div class="row">
+        <label>Chapter <select id="chapterSelect"></select></label>
+        <label>Language <select id="langSelect"></select></label>
+        <button id="translateBtn" type="button">Translate / ensure</button>
+        <button id="showOriginal" type="button">Original</button>
+      </div>
+      <div id="readerMeta" class="hint"></div>
+      <article id="readerBody" class="reader"></article>
+    </div>
+    <div class="card">
+      <h2>Terms <small class="hint">— the story's glossary; corrections propagate everywhere</small></h2>
+      <div id="terms" class="terms"></div>
+      <div class="row">
+        <label>Source term <input id="termSource" placeholder="キリト"></label>
+        <label>Use this <input id="termCanonical" placeholder="Kirito"></label>
+        <button id="saveTerm" type="button">Save term (updates all chapters)</button>
+      </div>
+      <div id="termResult" class="hint"></div>
+      <details>
+        <summary>Suggested terms from this story</summary>
+        <div id="termSuggest" class="hint"></div>
+      </details>
+    </div>
+  </section>
+
+</main>
+<footer><small>Groq primary · Gemini extreme backup · translation memory + term table keep every story consistent.</small></footer>
+<script src="app.js"></script>
+</body>
+</html>

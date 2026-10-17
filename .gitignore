@@ -1,0 +1,15 @@
+# dependencies
+node_modules/
+
+# environment / secrets — never commit
+.env
+.env.*
+!.env.example
+
+# library database (texts + db.json) — runtime data, not source
+data/
+*.log
+
+# OS
+Thumbs.db
+.DS_Store

@@ -1,0 +1,34 @@
+# Render blueprint — LN Translator (website + shared library).
+#
+# Deploy: push to GitHub, then Render Dashboard → New → Web Service → pick the
+# repo (render.yaml is picked up), or use the Render API. Add the two free model
+# keys under Environment; they stay server-side and drive the Auto chain.
+#
+# IMPORTANT (persistence): Render's free plan has an EPHEMERAL filesystem, so the
+# shared library at DATA_DIR resets on every deploy/restart. For a real
+# Wikipedia-style library, add a Render Disk (paid) and point DATA_DIR at it —
+# the disk block below is ready, just uncomment and remove `plan: free`.
+services:
+  - type: web
+    name: ln-translator
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/stats
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # Primary model (Groq) — set in the dashboard, never in the repo.
+      - key: GROQ_API_KEY
+        sync: false
+      # Extreme backup only (Gemini). Only used if Groq is gone/quota-exhausted.
+      - key: GEMINI_API_KEY
+        sync: false
+      # Where the shared library lives. Defaults to ./data inside the container.
+      - key: DATA_DIR
+        value: /var/data
+    # disk:
+    #   name: ln-library
+    #   mountPath: /var/data
+    #   sizeGB: 1

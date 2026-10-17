@@ -1,0 +1,22 @@
+{
+  "name": "ln-translator",
+  "version": "1.0.0",
+  "description": "Light novel / web novel translator — natural-flow translation, any language to any language. Web UI + CLI batch mode. Free engine (no key) + AI engine (OpenAI-compatible).",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "ln-translate": "./src/cli.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js --port 3000",
+    "cli": "node src/cli.js --help",
+    "test": "node --test test/translator.test.js test/library.test.js"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1"
+  },
+  "license": "MIT"
+}
