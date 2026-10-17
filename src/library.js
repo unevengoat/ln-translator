@@ -254,7 +254,8 @@ export async function bulkIngest(store, {
 /* -------------------------------------------------------------- translation */
 
 export async function translateChapter(store, {
-  workId, chapterId, target, difficulty = DEFAULT_DIFFICULTY, force = false, fetchFn = fetch, translate = translateWithPolicy, onProgress,
+  workId, chapterId, target, difficulty = DEFAULT_DIFFICULTY, force = false, fetchFn = fetch,
+  translate = translateWithPolicy, onProgress, providers,
 } = {}) {
   if (!target) throw new Error("A target language is required.");
   const level = normalizeDifficulty(difficulty);
@@ -290,31 +291,65 @@ export async function translateChapter(store, {
 
   const warnings = [];
   let provider = pinned ? `${pinned.provider}/${pinned.model}` : null;
-  for (let n = 0; n < todo.length; n++) {
-    const i = todo[n];
-    const r = await translate(chunks[i], {
-      source: work.lang, target, glossary: glossaryFor(chunks[i]), prevTail: results[i - 1]?.slice(-500) || "",
-      pinned, fetchFn, keepHonorifics: settings.keepHonorifics, formality: settings.formality, notes: settings.notes,
-      difficulty: level, sameLanguage,
-    });
-    // Strip leftover source artefacts (stray と, 「」 …) before storing/linting.
-    results[i] = cleanTranslationArtifacts(r.text.trim(), target);
-    warnings.push(...lintTranslation(chunks[i], results[i], { target, glossary: glossaryFor(chunks[i]) }));
-    provider = `${r.provider}/${r.model}`;
-    pinned = { provider: r.provider, model: r.model };
-    tm[sha256(chunks[i])] = { text: results[i], at: Date.now(), difficulty: level };
-    store.saveTm(workId, target, tm, level);
-    await store.update((db) => {
-      const w = db.works[workId];
-      if (!w) return;
-      w.models = { ...(w.models || {}), [target]: pinned };
-      w.usage = w.usage || { calls: 0, chunks: 0, byModel: {} };
-      w.usage.calls++;
-      w.usage.chunks++;
-      const mk = `${r.provider}/${r.model}`;
-      w.usage.byModel[mk] = (w.usage.byModel[mk] || 0) + 1;
-    });
-    onProgress?.({ done: n + 1, total: todo.length });
+  // Translate several chunks at once: the free provider pool spreads them across
+  // different free tiers, which is what makes a whole chapter feasible for free.
+  const CONC = Math.max(1, Math.min(Number(process.env.TRANSLATE_CONCURRENCY || 3), todo.length));
+  let nextChunk = 0;
+  let failure = null;
+  let doneCount = 0;
+  const usedProviders = new Set();
+
+  await Promise.all(Array.from({ length: CONC }, async () => {
+    while (!failure) {
+      const k = nextChunk++;
+      if (k >= todo.length) return;
+      const i = todo[k];
+      try {
+        const r = await translate(chunks[i], {
+          source: work.lang, target, glossary: glossaryFor(chunks[i]), prevTail: results[i - 1]?.slice(-500) || "",
+          pinned, fetchFn, keepHonorifics: settings.keepHonorifics, formality: settings.formality, notes: settings.notes,
+          difficulty: level, sameLanguage, providers,
+        });
+        // Strip leftover source artefacts (stray と, 「」 …) before storing/linting.
+        results[i] = cleanTranslationArtifacts(r.text.trim(), target);
+        warnings.push(...lintTranslation(chunks[i], results[i], { target, glossary: glossaryFor(chunks[i]) }));
+        provider = `${r.provider}/${r.model}`;
+        pinned = { provider: r.provider, model: r.model };
+        usedProviders.add(provider);
+        tm[sha256(chunks[i])] = { text: results[i], at: Date.now(), difficulty: level };
+        store.saveTm(workId, target, tm, level);
+        await store.update((db) => {
+          const w = db.works[workId];
+          if (!w) return;
+          w.models = { ...(w.models || {}), [target]: { provider: r.provider, model: r.model } };
+          w.usage = w.usage || { calls: 0, chunks: 0, byModel: {} };
+          w.usage.calls++;
+          w.usage.chunks++;
+          const mk = `${r.provider}/${r.model}`;
+          w.usage.byModel[mk] = (w.usage.byModel[mk] || 0) + 1;
+        });
+        doneCount++;
+        onProgress?.({ done: doneCount, total: todo.length });
+      } catch (e) {
+        failure = e;
+        return;
+      }
+    }
+  }));
+  if (failure) {
+    // Keep the chunks that did succeed — a retry resumes from exactly here.
+    const partial = results.filter((v) => v !== undefined).join("\n\n");
+    if (partial) {
+      const h = await store.saveText(partial);
+      await store.update((db) => {
+        db.translations[`${workId}|${chapterId}|${target}|${level}`] = {
+          key: `${workId}|${chapterId}|${target}|${level}`, workId, chapterId, target, difficulty: level,
+          hash: h, chunks: chunks.length, done: doneCount, partial: true, at: Date.now(), provider, warnings, qa: summarizeWarnings(warnings),
+        };
+      });
+      await store.flush();
+    }
+    throw new Error(`${failure.message} (saved ${doneCount}/${todo.length} chunks of this chapter — retry to continue)`);
   }
 
   const translation = results.filter((v) => v !== undefined).join("\n\n");

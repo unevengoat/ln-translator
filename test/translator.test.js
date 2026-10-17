@@ -2,6 +2,13 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 process.env.AI_MIN_INTERVAL_MS = "0";
 process.env.AI_RETRY_BASE_MS = "5";
+process.env.POOL_MIN_GAP_MS = "0";
+process.env.POOL_COOLDOWN_MS = "0";
+process.env.POOL_DEADLINE_MS = "60";
+// Fake keys make the pool consider these providers; every test stubs fetch, so
+// nothing here touches the network.
+process.env.GROQ_API_KEY = process.env.GROQ_API_KEY || "test-key";
+process.env.GEMINI_API_KEY = process.env.GEMINI_API_KEY || "test-key";
 import { chunkNovel, joinChunks, normalizeText } from "../src/chunker.js";
 import { parseGlossary, protectTerms, glossaryPromptLines } from "../src/glossary.js";
 import { buildSystemPrompt, buildUserMessage } from "../src/prompt.js";
@@ -63,7 +70,13 @@ describe("providers", () => {
     assert.equal(c.baseUrl, "https://text.pollinations.ai/openai");
   });
   it("throws a helpful error when a key is missing", () => {
-    assert.throws(() => resolveProvider("groq", { apiKey: "" }), /GROQ_API_KEY/);
+    const saved = process.env.GROQ_API_KEY;
+    delete process.env.GROQ_API_KEY;
+    try {
+      assert.throws(() => resolveProvider("groq", { apiKey: "" }), /GROQ_API_KEY/);
+    } finally {
+      process.env.GROQ_API_KEY = saved;
+    }
   });
   it("quality chain is groq then gemini only (no keyless MT)", () => {
     assert.deepEqual(DEFAULT_CHAIN, ["groq", "gemini"]);
@@ -87,51 +100,48 @@ describe("orchestrator (AI only)", () => {
 
   it("translates and preserves paragraph breaks", async () => {
     const { translation, chunks, engine } = await translateText("Para one.\n\nPara two.", {
-      source: "ja", target: "en", engine: "ai", ai: { apiKey: "k" }, chain: "auto", fetchFn: okFetch("OUT"),
+      source: "ja", target: "en", engine: "ai", ai: { apiKey: "k" }, providers: ["groq"], fetchFn: okFetch("OUT"),
     });
     assert.equal(chunks, 1);
     assert.equal(engine, "ai");
     assert.match(translation, /OUT/);
   });
 
-  it("uses the groq → gemini chain and reports the provider", async () => {
-    const { provider } = await translateText("テスト。", { source: "ja", target: "en", engine: "ai", ai: { apiKey: "k" }, chain: "auto", fetchFn: okFetch("X") });
-    assert.equal(provider, "groq/openai/gpt-oss-120b");
-  });
-
-  it("falls through to gemini when groq fails, and never to keyless MT", async () => {
-    let calls = [];
+  it("uses the free pool and reports the provider", async () => {
+    const seen = [];
     const fetchFn = async (url, opts) => {
-      const model = JSON.parse(opts.body).model;
-      calls.push(model);
-      if (String(url).includes("api.groq.com")) {
-        if (String(url).endsWith("/models")) return { ok: false, status: 401, text: async () => "no" };
-        return { ok: false, status: 429, text: async () => "Rate limit exceeded" };
-      }
-      return { ok: true, json: async () => ({ choices: [{ message: { content: "GEMINI OK" } }] }) };
+      seen.push(String(url));
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "X" } }] }) };
     };
-    const { translation, provider } = await translateText("テスト。", { source: "ja", target: "en", engine: "ai", ai: { apiKey: "k" }, chain: "auto", fetchFn });
-    assert.equal(translation, "GEMINI OK");
-    assert.equal(provider, "gemini/gemini-flash-latest");
+    const { provider } = await translateText("テスト。", { source: "ja", target: "en", ai: { apiKey: "k" }, providers: ["groq"], fetchFn });
+    assert.match(provider, /groq\//);
   });
 
-  it("throws (asking for a key) when every model fails — no free-MT fallback", async () => {
-    const fetchFn = async (url) => {
-      if (String(url).endsWith("/models")) return { ok: false, status: 401, text: async () => "no" };
-      return { ok: false, status: 429, text: async () => "Rate limit exceeded" };
-    };
+  it("keeps the pinned provider first when one is set", async () => {
+    const urls = [];
+    const fetchFn = async (url, opts) => { urls.push(String(url)); return { ok: true, json: async () => ({ choices: [{ message: { content: "PINNED" } }] }) }; };
+    const { translation, provider } = await translateText("テスト。", {
+      source: "ja", target: "en", chain: [{ provider: "gemini" }], ai: { apiKey: "k" }, fetchFn,
+    });
+    assert.equal(translation, "PINNED");
+    assert.ok(urls.some((u) => u.includes("generativelanguage")), "used the pinned gemini provider");
+  });
+
+  it("throws (asking for a key) when nothing can translate — no keyless degradation", async () => {
+    const fetchFn = async () => ({ ok: false, status: 429, text: async () => "Rate limit exceeded" });
     await assert.rejects(
-      () => translateText("テスト。", { source: "ja", target: "en", engine: "ai", ai: { apiKey: "k" }, chain: "auto", fetchFn }),
+      () => translateText("テスト。", { source: "ja", target: "en", ai: { apiKey: "k" }, providers: ["groq"], fetchFn }),
       /Add a fresh key/
     );
   });
 
-  it("rejects same source/target", async () => {
+  it("rejects same source/target at medium level (rewrite needs a level)", async () => {
     await assert.rejects(() => translateText("hi", { source: "en", target: "en" }), /same/);
   });
 
-  it("stops on a failing single provider when a chain is pinned", async () => {
-    const fetchFn = async () => ({ ok: false, status: 500, text: async () => "boom" });
-    await assert.rejects(() => translateText("テスト。", { source: "ja", target: "en", engine: "ai", chain: [{ provider: "groq" }], ai: { apiKey: "k" }, fetchFn }), /All models failed/);
+  it("allows same-language rewriting at a specific level", async () => {
+    const fetchFn = async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: "SIMPLE" } }] }) });
+    const { translation } = await translateText("Hard text here.", { source: "en", target: "en", difficulty: "easy", ai: { apiKey: "k" }, providers: ["groq"], fetchFn });
+    assert.equal(translation, "SIMPLE");
   });
 });

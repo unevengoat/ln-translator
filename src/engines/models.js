@@ -1,13 +1,14 @@
-// Model policy: Groq primary, Gemini extreme backup (per user config).
-// A story's translations are pinned to the model that made them; we only
-// switch models when the pinned one is gone (404/410/retired), by probing the
-// provider's live model list — otherwise we fail loudly and ask for a new key
-// instead of silently changing the story's voice.
+// Model policy: keep a story on one model when possible, otherwise spread the work
+// across the free provider pool (see pool.js). Nothing here needs a paid account.
 import { translateAiChunk } from "./aiEngine.js";
 import { resolveProvider, PROVIDERS } from "./providers.js";
+import { translatePooled, PoolExhaustedError, configuredProviders, poolStatus } from "./pool.js";
+import { isTransient, isModelMissing, retryAfterMs, sleep } from "./limits.js";
 
 export const PRIMARY = { provider: "groq", model: "openai/gpt-oss-120b" };
 export const BACKUP = { provider: "gemini", model: "gemini-flash-latest" };
+
+export { isTransient, isModelMissing, retryAfterMs, configuredProviders, poolStatus, PoolExhaustedError };
 
 export function isModelGone(status, body) {
   if (status === 404 || status === 410) return true;
@@ -34,61 +35,10 @@ async function listModels(provider, apiKey, fetchFn = fetch) {
 export function pickCandidates(provider, ids) {
   const chat = ids.filter((id) => !/embed|whisper|tts|image|guard|moderation|realtime|vision|transcri|okash/i.test(id));
   const preferred =
-    provider === "gemini"
-      ? /(flash|pro)/i
-      : provider === "openrouter"
-        ? /:free$/i
-        : /(gpt-oss|llama|qwen|gemma|mistral|deepseek)/i;
+    provider === "gemini" ? /(flash|pro)/i : provider === "openrouter" ? /:free$/i : /(gpt-oss|llama|qwen|gemma|mistral|deepseek)/i;
   return [...chat.filter((id) => preferred.test(id)), ...chat.filter((id) => !preferred.test(id))]
     .filter((id, i, a) => a.indexOf(id) === i)
     .slice(0, 2);
-}
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-/** Is this error worth retrying on the same provider? (rate limit / transient) */
-function isTransient(message = "") {
-  return /HTTP (408|409|425|429|500|502|503|504)|timeout|timed out|fetch failed|ECONNRESET|socket hang up|aborted|rate limit|quota/i.test(message);
-}
-
-/** Provider-requested wait, e.g. "retry-after=12" appended to the error message. */
-function retryAfterMs(message = "") {
-  const m = String(message).match(/retry[- _]?after[=:\s]+(\d+(?:\.\d+)?)/i);
-  return m ? Math.min(Number(m[1]) * 1000, 120000) : 0;
-}
-
-/* One model call at a time, spaced out — free tiers rate-limit hard, and parallel
-   jobs used to trip every limit at once. */
-const minGapMs = () => Number(process.env.AI_MIN_INTERVAL_MS ?? 1200);
-let callChain = Promise.resolve();
-let lastCallAt = 0;
-function paced(fn) {
-  const run = callChain.then(async () => {
-    const wait = Math.max(0, lastCallAt + minGapMs() - Date.now());
-    if (wait > 0) await sleep(wait);
-    lastCallAt = Date.now();
-    return fn();
-  });
-  callChain = run.then(() => {}, () => {});
-  return run;
-}
-
-/** One model call with exponential backoff + jitter, honouring Retry-After. */
-async function callWithRetry(fn, { attempts = 6, baseMs } = {}) {
-  const base = baseMs ?? Number(process.env.AI_RETRY_BASE_MS ?? 2000);
-  let lastErr;
-  for (let i = 0; i < attempts; i++) {
-    try {
-      return await paced(fn);
-    } catch (e) {
-      lastErr = e;
-      if (!isTransient(e.message) || i === attempts - 1) throw e;
-      const asked = retryAfterMs(e.message);
-      const backoff = Math.max(asked, base * 2 ** i) + Math.floor(Math.random() * 400);
-      await sleep(backoff);
-    }
-  }
-  throw lastErr;
 }
 
 function envKey(provider) {
@@ -98,69 +48,39 @@ function envKey(provider) {
 }
 
 /**
- * Translate one chunk under the Groq→Gemini policy.
- * pinned: {provider, model} to try first (keeps one story on one model).
- * There is no keyless fallback: if both models are unavailable we throw and ask
- * for a fresh key rather than silently changing the story's voice or quality.
+ * Translate one chunk.
+ *  1. the story's pinned model (keeps a book's voice consistent), with one
+ *     model-swap attempt if that exact model was retired;
+ *  2. otherwise the free provider pool, which spreads load across every free tier.
  */
 export async function translateWithPolicy(chunk, opts = {}) {
-  const {
-    source = "auto", target = "en", keepHonorifics = true, formality = "match",
-    glossary = [], prevTail = "", pinned = null, notes = "",
-    difficulty = "medium", sameLanguage = false,
-    fetchFn = fetch, timeoutMs = 120000,
-  } = opts;
-  const legs = [];
-  if (pinned?.provider) legs.push({ ...PRIMARY, ...pinned });
-  legs.push(PRIMARY, BACKUP);
-  const seen = new Set();
+  const { pinned = null, timeoutMs = 120000, fetchFn = fetch, ...rest } = opts;
   const attempts = [];
-  const errors = [];
 
-  for (const leg of legs) {
-    const key = `${leg.provider}/${leg.model}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const apiKey = envKey(leg.provider) || opts.apiKey;
-    if (!apiKey && PROVIDERS[leg.provider]?.needsKey) {
-      attempts.push({ provider: key, ok: false, error: "no key configured" });
-      errors.push(`${key}: no key`);
-      continue;
-    }
-    const triedModels = new Set();
-    const candidates = [leg.model];
-    let candidateList = null;
-    while (candidates.length) {
-      const model = candidates.shift();
-      if (triedModels.has(model)) continue;
-      triedModels.add(model);
+  if (pinned?.provider && envKey(pinned.provider)) {
+    for (const model of [pinned.model, ...pickCandidates(pinned.provider, await listModels(pinned.provider, envKey(pinned.provider), fetchFn).catch(() => []))]) {
+      if (!model) continue;
       try {
-        const config = resolveProvider(leg.provider, { model, apiKey, timeoutMs });
-        const text = await callWithRetry(() =>
-          translateAiChunk(chunk, { source, target, keepHonorifics, formality, glossary, prevTail, notes, difficulty, sameLanguage, config, fetchFn })
-        );
-        attempts.push({ provider: `${leg.provider}/${model}`, ok: true });
-        return { text, provider: leg.provider, model, attempts };
+        const config = resolveProvider(pinned.provider, { model, timeoutMs });
+        const text = await translateAiChunk(chunk, { ...rest, fetchFn, config });
+        attempts.push({ provider: `${pinned.provider}/${model}`, ok: true });
+        return { text, provider: pinned.provider, model, attempts };
       } catch (e) {
-        const m = e.message;
-        attempts.push({ provider: `${leg.provider}/${model}`, ok: false, error: m.slice(0, 160) });
-        errors.push(`${leg.provider}/${model}: ${m.slice(0, 120)}`);
-        // Model retired? Probe the provider's live list once, try replacements.
-        if (!candidateList && /HTTP (404|410)/.test(m) && isModelGone(404, m)) {
-          try {
-            candidateList = pickCandidates(leg.provider, await listModels(leg.provider, apiKey, fetchFn));
-            for (const c of candidateList) if (!triedModels.has(c)) candidates.push(c);
-          } catch (le) {
-            errors.push(`${leg.provider} model-list: ${le.message.slice(0, 100)}`);
-          }
-        }
+        attempts.push({ provider: `${pinned.provider}/${model}`, ok: false, error: String(e.message).slice(0, 160) });
+        if (!isModelMissing(e.message)) break; // rate limit etc → just use the pool
+        await sleep(150);
       }
     }
   }
 
-  throw new Error(
-    "Both story models are unavailable (Groq primary, Gemini backup). " +
-    "Add a fresh key (Groq free tier: console.groq.com) and retry — nothing was overwritten. " +
-    "Details: " + errors.join(" | ")
-  );
+  try {
+    const r = await translatePooled(chunk, { ...rest, fetchFn, timeoutMs });
+    return { ...r, attempts: [...attempts, ...r.attempts] };
+  } catch (e) {
+    const detail = (e.attempts || attempts).map((a) => `${a.provider}: ${a.error || "ok"}`).join(" | ");
+    throw new Error(
+      "No free model could translate this right now. Add a fresh key (Groq free tier: console.groq.com) or retry in a few minutes — " +
+      "nothing was overwritten, and it resumes from here. Details: " + detail
+    );
+  }
 }

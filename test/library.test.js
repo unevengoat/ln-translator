@@ -3,6 +3,11 @@ import assert from "node:assert/strict";
 // Tests stub the network, so no need to pace calls like production does.
 process.env.AI_MIN_INTERVAL_MS = "0";
 process.env.AI_RETRY_BASE_MS = "5";
+process.env.POOL_MIN_GAP_MS = "0";
+process.env.POOL_COOLDOWN_MS = "0";
+process.env.POOL_DEADLINE_MS = "600";
+process.env.GROQ_API_KEY = process.env.GROQ_API_KEY || "test-key";
+process.env.GEMINI_API_KEY = process.env.GEMINI_API_KEY || "test-key";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -460,24 +465,21 @@ describe("model policy", () => {
     let n = 0;
     const fetchFn = async () => {
       n++;
-      if (n === 1) return { ok: false, status: 429, text: async () => "Rate limit exceeded" };
+      if (n === 1) return { ok: false, status: 429, text: async () => "Rate limit exceeded", headers: { get: () => null } };
       return { ok: true, json: async () => ({ choices: [{ message: { content: "RETRIED OK" } }] }) };
     };
-    const r = await translateWithPolicy("テスト。", { source: "ja", target: "en", apiKey: "k", fetchFn });
+    const r = await translateWithPolicy("テスト。", { source: "ja", target: "en", apiKey: "k", providers: ["groq"], fetchFn });
     assert.equal(r.text, "RETRIED OK");
-    assert.equal(n, 2);
+    assert.ok(n >= 2);
   });
-  it("falls back to gemini only when groq is unavailable", async () => {
-    const fetchFn = async (url, opts) => {
-      const body = JSON.parse(opts.body);
-      if (String(url).includes("api.groq.com")) {
-        if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "openai/gpt-oss-120b" }] }) };
-        return { ok: false, status: 404, text: async () => "The model does not exist" };
-      }
-      return { ok: true, json: async () => ({ choices: [{ message: { content: "GEMINI:" + body.model } }] }) };
+  it("moves to another free provider when one is rate-limited", async () => {
+    const fetchFn = async (url) => {
+      if (String(url).includes("api.groq.com")) return { ok: false, status: 429, text: async () => "Rate limit exceeded", headers: { get: () => null } };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "POOL OK" } }] }) };
     };
-    const r = await translateWithPolicy("テスト。", { source: "ja", target: "en", apiKey: "k", fetchFn });
-    assert.equal(r.provider, "gemini");
+    const r = await translateWithPolicy("テスト。", { source: "ja", target: "en", apiKey: "k", providers: ["groq", "gemini"], fetchFn });
+    assert.equal(r.text, "POOL OK");
+    assert.notEqual(r.provider, "groq");
   });
   it("asks for a new key instead of silently changing voice (strict)", async () => {
     const fetchFn = async (url) => {

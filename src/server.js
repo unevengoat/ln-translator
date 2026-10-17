@@ -16,7 +16,7 @@ import {
   DIFFICULTIES, DEFAULT_DIFFICULTY, cleanTranslationArtifacts,
 } from "./library.js";
 import { normalizeDifficulty } from "./qa.js";
-import { PRIMARY, BACKUP } from "./engines/models.js";
+import { PRIMARY, BACKUP, poolStatus, configuredProviders } from "./engines/models.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, "..", "public");
@@ -177,6 +177,8 @@ const server = createServer(async (req, res) => {
       return json(res, 200, {
         ok: true, at: Date.now(), storage: store.backendName, storageDescription: store.describe(), storageInfo,
         keys: { groq: !!process.env.GROQ_API_KEY, gemini: !!process.env.GEMINI_API_KEY },
+        providers: configuredProviders(),
+        pool: poolStatus(),
         editTokenRequired: !!EDIT_TOKEN, stats: s,
       });
     }
