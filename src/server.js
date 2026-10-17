@@ -10,7 +10,7 @@ import { LANGUAGES, normalizeCode } from "./languages.js";
 import { globalStore } from "./store.js";
 import { parseBuffer } from "./files.js";
 import {
-  ingestText, bulkIngest, listWorks, getWork, getChapter, translateChapter,
+  ingestText, bulkIngest, workIdFor, listWorks, getWork, getChapter, translateChapter,
   correctTerm, suggestTerms, stats, searchLibrary, activityFeed, updateWork, deleteChapter, deleteWork,
   restoreVersion, importGlossary, exportGlossary, splitChapters, sortChapters,
 } from "./library.js";
@@ -242,13 +242,30 @@ const server = createServer(async (req, res) => {
     if (pathname === "/api/works/bulk" && method === "POST") {
       const b = await readJson(req);
       const targets = (b.autoTranslateTo || []).map(normalizeCode).filter(Boolean);
-      const result = await bulkIngest(store, {
-        title: b.title, author: b.author, sourceLang: normalizeCode(b.sourceLang || b.source || "auto"),
-        sourceUrl: b.sourceUrl, volume: b.volume || "", text: b.text, chapters: b.chapters,
-        autoTranslateTo: [], settings: b.settings || {},
+      const workId = await workIdFor(store, { title: b.title, author: b.author, sourceUrl: b.sourceUrl });
+      // Ingest + translate as one background job so a whole volume can't time out.
+      const job = startJob("ingest", { workId, targets });
+      job.total = 1 + targets.length;
+      runJob(job, async () => {
+        const result = await bulkIngest(store, {
+          title: b.title, author: b.author, sourceLang: normalizeCode(b.sourceLang || b.source || "auto"),
+          sourceUrl: b.sourceUrl, volume: b.volume || "", text: b.text, chapters: b.chapters,
+          autoTranslateTo: [], settings: b.settings || {},
+        });
+        job.chapters = result.chapters;
+        job.done = 1;
+        job.current = `saved ${result.chapters.length} chapter(s)`;
+        for (const target of targets) {
+          for (const c of result.chapters) {
+            job.current = `${c.title} → ${target}`;
+            try { await translateChapter(store, { workId, chapterId: c.chapterId, target }); }
+            catch (e) { job.errors = [...(job.errors || []), `${c.title} → ${target}: ${e.message.slice(0, 120)}`]; }
+          }
+          job.done++;
+        }
+        return { workId, chapters: result.chapters.length, targets };
       });
-      const job = targets.length ? startTranslateJob(result.workId, targets) : null;
-      return json(res, 200, { ...result, jobId: job?.id || null, url: `/#/work/${result.workId}` });
+      return json(res, 202, { jobId: job.id, workId, url: `/#/work/${workId}` });
     }
     if (pathname === "/api/works/preview-split" && method === "POST") {
       const b = await readJson(req);

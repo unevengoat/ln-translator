@@ -20,6 +20,12 @@ const DEFAULT_SETTINGS = { keepHonorifics: true, formality: "match", notes: "" }
 const workKey = (title, author, sourceUrl) =>
   "w_" + sha256([sourceUrl || "", String(title || "").trim().toLowerCase(), String(author || "").trim().toLowerCase()].join("|")).slice(0, 24);
 
+/** The id a story will have for these details (respects renames via the index). */
+export async function workIdFor(store, { title, author = "", sourceUrl = "" }) {
+  const db = await store.load();
+  return db.workIndex[workKey(title, author, sourceUrl)] || workKey(title, author, sourceUrl);
+}
+
 function logActivity(db, entry) {
   db.activity = db.activity || [];
   db.activity.push({ at: Date.now(), ...entry });
@@ -126,7 +132,7 @@ export async function ensureTermsForLang(store, workId, lang, { fetchFn = fetch 
 export async function ingestText(store, {
   title, author = "", sourceLang = "auto", sourceUrl = "",
   chapterTitle = "", chapterIndex = null, volume = "", text,
-  autoTranslateTo = [], settings = {}, fetchFn = fetch, translate = translateWithPolicy,
+  autoTranslateTo = [], settings = {}, fetchFn = fetch, translate = translateWithPolicy, flush = true,
 } = {}) {
   if (!title || !String(title).trim()) throw new Error("A story title is required.");
   const norm = normalizeText(text);
@@ -180,7 +186,7 @@ export async function ingestText(store, {
     result.termsAdded = mergeTerms(terms, TERM_REF_LANG, latinCandidates(norm).map((c) => ({ source: c, translation: c })));
     store.saveTerms(result.workId, terms);
     await store.update((d) => { const w = d.works[result.workId]; if (w) w.terms = termCounts(terms); });
-    await store.flush();
+    if (flush) await store.flush();
   }
 
   for (const target of autoTranslateTo) {
@@ -209,11 +215,13 @@ export async function bulkIngest(store, {
       title, author, sourceLang, sourceUrl,
       chapterTitle: c.title || `Chapter ${i + 1}`, chapterIndex: null,
       volume: c.volume ?? volume ?? "",
-      text: c.text, autoTranslateTo: [], settings, fetchFn, translate,
+      text: c.text, autoTranslateTo: [], settings, fetchFn, translate, flush: false,
     });
     workId = r.workId;
     out.push({ chapterId: r.chapterId, title: c.title || `Chapter ${i + 1}`, volume: r.volume || "", created: r.created, duplicate: !!r.duplicate, version: !!r.version });
   }
+  // One storage write for the whole batch instead of one per chapter.
+  await store.flush();
   const translated = [];
   for (const target of autoTranslateTo) {
     if (!target || target === sourceLang) continue;

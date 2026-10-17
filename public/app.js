@@ -327,17 +327,19 @@ $("translateAllBtn").onclick = async () => {
 };
 
 /** Poll a background job and show progress (long work never blocks one request). */
-async function followJob(jobId, { reload, label = "Translating" } = {}) {
+async function followJob(jobId, { reload, label = "Translating", target } = {}) {
   if (!jobId) return null;
+  const out = target || $("readerMeta");
   for (let i = 0; i < 1200; i++) {
     const job = await API(`/api/jobs/${jobId}`).catch(() => null);
     if (!job) break;
-    $("readerMeta").innerHTML = job.total
+    out.innerHTML = job.total
       ? `${esc(label)}… ${job.done}/${job.total}${job.current ? ` — ${esc(job.current)}` : ""}`
       : `${esc(label)}… preparing`;
     if (job.state === "done" || job.state === "error") {
       await reload?.();
       if (job.state === "error") throw new Error(job.error || "job failed");
+      if (job.errors?.length) toast(`Finished with ${job.errors.length} issue(s)`, "warn");
       return job;
     }
     await new Promise((r) => setTimeout(r, 2500));
@@ -519,6 +521,8 @@ async function saveChapters({ translate }) {
       const vers = r.chapters.filter((c) => c.version).length;
       const vols = [...new Set(r.chapters.map((c) => c.volume).filter(Boolean))];
       bits.push(`Saved ${added} new chapter(s)${vols.length ? ` in ${vols.length} volume(s)` : ""}${dups ? `, ${dups} already existed` : ""}${vers ? `, ${vers} updated (old versions kept)` : ""}.`);
+    } else if (r.jobId) {
+      bits.push("Working in the background…");
     } else {
       bits.push(r.duplicate ? "Already in the library (same text)." : r.version ? "Saved as a new version." : "Chapter saved.");
     }
@@ -526,10 +530,9 @@ async function saveChapters({ translate }) {
     toast("Saved", "ok");
     loadStats();
     clearAddForm();
-    if (r.jobId && translate) {
-      location.hash = `#/work/${r.workId}`;
-      await followJob(r.jobId, { reload: () => refreshWork() });
-      toast("Translation finished", "ok");
+    if (r.jobId) {
+      await followJob(r.jobId, { label: translate ? "Saving & translating" : "Saving", target: $("uploadResult"), reload: async () => { location.hash = `#/work/${r.workId}`; } });
+      toast(translate ? "Saved and translated" : "Saved", "ok");
     } else if (translate) {
       location.hash = `#/work/${r.workId}`;
     }
