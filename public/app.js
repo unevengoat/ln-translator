@@ -246,10 +246,11 @@ $("translateBtn").onclick = async () => {
 /* ------------------------------------------------------------- story settings */
 $("storySettingsBtn").onclick = async () => {
   const w = currentWork;
-  const title = prompt("Story title:", w.title); if (title === null) return;
-  const author = prompt("Author:", w.author || "") ?? w.author;
+  const title = prompt("Story title:", w.title);
+  if (title === null) return;
+  const author = (prompt("Author:", w.author || "") ?? w.author) || "";
   const sourceUrl = prompt("Source URL:", w.sourceUrl || "") ?? w.sourceUrl;
-  const notes = prompt("Translator notes for this story:", w.settings?.notes || "") ?? w.settings?.notes || "";
+  const notes = (prompt("Translator notes for this story:", w.settings?.notes || "") ?? w.settings?.notes) || "";
   try {
     await patch(`/api/works/${w.id}`, { title, author, sourceUrl, settings: { notes } });
     toast("Story updated", "ok");
