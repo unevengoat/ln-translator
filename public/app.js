@@ -317,15 +317,42 @@ $("translateBtn").onclick = async () => {
 $("translateAllBtn").onclick = async () => {
   const missing = currentWork.chapters.filter((c) => !c.translations.includes(currentLang)).length;
   if (!confirm(`Translate all ${currentWork.chapters.length} chapter(s) to ${langName(currentLang)}${missing ? ` (${missing} not done yet)` : " (already done — will fill gaps)"}?`)) return;
-  busy($("translateAllBtn"), true, `Translating 0/${currentWork.chapters.length}…`);
+  busy($("translateAllBtn"), true, "Starting…");
   try {
     const r = await post(`/api/works/${currentWork.id}/translate-all`, { target: currentLang });
-    toast(`Done: ${r.ok} chapter(s) translated${r.failed ? `, ${r.failed} failed` : ""}`, r.failed ? "warn" : "ok");
-    currentWork = await API("/api/works/" + currentWork.id);
-    fillChapterSelect(); await loadChapter(); loadStats();
-  } catch (e) { toast("Error: " + e.message, "error"); }
-  finally { busy($("translateAllBtn"), false); }
+    busy($("translateAllBtn"), false);
+    await followJob(r.jobId, { reload: () => refreshWork(), label: `Translating to ${langName(currentLang)}` });
+    toast("Whole story translated", "ok");
+  } catch (e) { toast("Error: " + e.message, "error"); busy($("translateAllBtn"), false); }
 };
+
+/** Poll a background job and show progress (long work never blocks one request). */
+async function followJob(jobId, { reload, label = "Translating" } = {}) {
+  if (!jobId) return null;
+  for (let i = 0; i < 1200; i++) {
+    const job = await API(`/api/jobs/${jobId}`).catch(() => null);
+    if (!job) break;
+    $("readerMeta").innerHTML = job.total
+      ? `${esc(label)}… ${job.done}/${job.total}${job.current ? ` — ${esc(job.current)}` : ""}`
+      : `${esc(label)}… preparing`;
+    if (job.state === "done" || job.state === "error") {
+      await reload?.();
+      if (job.state === "error") throw new Error(job.error || "job failed");
+      return job;
+    }
+    await new Promise((r) => setTimeout(r, 2500));
+  }
+  return null;
+}
+
+async function refreshWork() {
+  if (!currentWork) return;
+  currentWork = await API("/api/works/" + currentWork.id);
+  fillVolumeSelect();
+  fillChapterSelect();
+  await loadChapter();
+  loadStats();
+}
 
 /* ------------------------------------------------------------- story settings */
 $("storySettingsBtn").onclick = async () => {
@@ -476,7 +503,7 @@ async function saveChapters({ translate }) {
   if (translate && !autoTranslateTo.length) { toast("Pick at least one language to translate into", "warn"); return; }
   const settings = { keepHonorifics: $("setHonorifics").checked, formality: $("setFormality").value, notes: $("setNotes").value };
   const btn = translate ? $("saveTranslate") : $("saveOnly");
-  busy(btn, true, translate ? "Saving & translating…" : "Saving…");
+  busy(btn, true, translate ? "Saving…" : "Saving…");
   try {
     const body = {
       title, author: $("author").value, sourceLang: $("sourceLang").value,
@@ -495,13 +522,17 @@ async function saveChapters({ translate }) {
     } else {
       bits.push(r.duplicate ? "Already in the library (same text)." : r.version ? "Saved as a new version." : "Chapter saved.");
     }
-    if (r.termsAdded) bits.push(`${r.termsAdded} terms recorded.`);
-    if (translate && r.translated?.length) bits.push(`Translation done: ${r.translated.length} item(s).`);
-    if (r.translateError) bits.push("Translation issue: " + r.translateError);
     $("uploadResult").innerHTML = bits.join(" ") + ` <a href="#/work/${r.workId}">Open story →</a>`;
     toast("Saved", "ok");
     loadStats();
-    if (translate) { clearAddForm(); location.hash = `#/work/${r.workId}`; }
+    clearAddForm();
+    if (r.jobId && translate) {
+      location.hash = `#/work/${r.workId}`;
+      await followJob(r.jobId, { reload: () => refreshWork() });
+      toast("Translation finished", "ok");
+    } else if (translate) {
+      location.hash = `#/work/${r.workId}`;
+    }
   } catch (e) { toast("Error: " + e.message, "error"); $("uploadResult").textContent = "Error: " + e.message; }
   finally { busy(btn, false); }
 }

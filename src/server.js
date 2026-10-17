@@ -10,9 +10,9 @@ import { LANGUAGES, normalizeCode } from "./languages.js";
 import { globalStore } from "./store.js";
 import { parseBuffer } from "./files.js";
 import {
-  ingestText, bulkIngest, listWorks, getWork, getChapter, translateChapter, translateWholeStory,
+  ingestText, bulkIngest, listWorks, getWork, getChapter, translateChapter,
   correctTerm, suggestTerms, stats, searchLibrary, activityFeed, updateWork, deleteChapter, deleteWork,
-  restoreVersion, importGlossary, exportGlossary, splitChapters,
+  restoreVersion, importGlossary, exportGlossary, splitChapters, sortChapters,
 } from "./library.js";
 import { PRIMARY, BACKUP } from "./engines/models.js";
 
@@ -22,6 +22,58 @@ const PORT = parseInt(process.argv.find((a) => a.startsWith("--port="))?.split("
 const MAX_JSON = 25_000_000;
 const EDIT_TOKEN = process.env.EDIT_TOKEN || "";
 const store = globalStore();
+
+/* ------------------------------------------------------------------- jobs
+ * Long work (translating a whole volume/story) must never run inside one HTTP
+ * request: the free host's proxy times out and the client sees a 502. Instead
+ * we return a job id immediately and the client polls /api/jobs/:id. */
+const jobs = new Map();
+let jobSeq = 0;
+function startJob(type, meta = {}) {
+  const id = `job_${(++jobSeq).toString(36)}${Date.now().toString(36)}`;
+  const job = { id, type, state: "running", done: 0, total: 0, error: null, startedAt: Date.now(), ...meta };
+  jobs.set(id, job);
+  if (jobs.size > 60) jobs.delete(jobs.keys().next().value);
+  return job;
+}
+function runJob(job, fn) {
+  Promise.resolve()
+    .then(fn)
+    .then((result) => { job.state = "done"; job.result = result; })
+    .catch((e) => { job.state = "error"; job.error = e.message; })
+    .finally(() => { job.finishedAt = Date.now(); });
+  return job;
+}
+
+/** Translate every chapter of a story into each target language, as a job. */
+function startTranslateJob(workId, targets, { force = false } = {}) {
+  const job = startJob("translate", { workId, targets });
+  runJob(job, async () => {
+    const db = await store.load();
+    const work = db.works[workId];
+    if (!work) throw new Error("Unknown story: " + workId);
+    const chapters = sortChapters(work);
+    job.total = chapters.length * targets.length;
+    const results = [];
+    for (const target of targets) {
+      for (const chapter of chapters) {
+        job.current = `${chapter.title} → ${target}`;
+        try {
+          const r = await translateChapter(store, { workId, chapterId: chapter.id, target, force });
+          results.push({ chapterId: chapter.id, target, ok: true, cached: r.cached });
+        } catch (e) {
+          results.push({ chapterId: chapter.id, target, ok: false, error: e.message.slice(0, 200) });
+          job.errors = [...(job.errors || []), `${chapter.title} → ${target}: ${e.message.slice(0, 120)}`];
+        }
+        job.done++;
+      }
+    }
+    job.ok = results.filter((r) => r.ok).length;
+    job.failed = results.filter((r) => !r.ok).length;
+    return { ok: job.ok, failed: job.failed, results };
+  });
+  return job;
+}
 
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json", ".svg": "image/svg+xml", ".webmanifest": "application/manifest+json", ".txt": "text/plain; charset=utf-8", ".xml": "application/xml" };
 
@@ -101,7 +153,7 @@ const server = createServer(async (req, res) => {
       models: { primary: `${PRIMARY.provider}/${PRIMARY.model}`, backup: `${BACKUP.provider}/${BACKUP.model}` },
       endpoints: [
         "GET /api/languages", "GET /api/providers", "GET /api/stats", "GET /api/health", "GET /api/activity",
-        "GET /api/search?q=", "GET /api/works?q=", "POST /api/works", "POST /api/works/bulk",
+        "GET /api/jobs", "GET /api/jobs/:id", "GET /api/search?q=", "GET /api/works?q=", "POST /api/works", "POST /api/works/bulk",
         "GET /api/works/:id", "PATCH /api/works/:id", "DELETE /api/works/:id",
         "GET /api/works/:id/chapters/:chapterId?lang=", "DELETE /api/works/:id/chapters/:chapterId",
         "POST /api/works/:id/chapters/:chapterId/translate", "POST /api/works/:id/chapters/:chapterId/versions/:hash/restore",
@@ -122,6 +174,11 @@ const server = createServer(async (req, res) => {
     if (method === "POST" && pathname === "/api/reload") {
       await store.reload();
       return json(res, 200, { reloaded: true, at: Date.now() });
+    }
+    if (method === "GET" && pathname === "/api/jobs") return json(res, 200, [...jobs.values()].slice(-20).reverse());
+    if (method === "GET" && /^\/api\/jobs\/[A-Za-z0-9_]+$/.test(pathname)) {
+      const job = jobs.get(pathname.split("/").pop());
+      return job ? json(res, 200, job) : json(res, 404, { error: "Unknown job" });
     }
     if (method === "GET" && pathname === "/api/languages") return json(res, 200, LANGUAGES);
     if (method === "GET" && pathname === "/api/providers") return json(res, 200, publicProviders());
@@ -163,13 +220,15 @@ const server = createServer(async (req, res) => {
     }
     if (pathname === "/api/works" && method === "POST") {
       const b = await readJson(req);
+      const targets = (b.autoTranslateTo || []).map(normalizeCode).filter(Boolean);
       const result = await ingestText(store, {
         title: b.title, author: b.author, sourceLang: normalizeCode(b.sourceLang || b.source || "auto"),
         sourceUrl: b.sourceUrl, chapterTitle: b.chapterTitle, volume: b.volume || "",
         chapterIndex: b.chapterIndex != null && b.chapterIndex !== "" ? parseInt(b.chapterIndex, 10) : null,
-        text: b.text, autoTranslateTo: (b.autoTranslateTo || []).map(normalizeCode), settings: b.settings || {},
+        text: b.text, autoTranslateTo: [], settings: b.settings || {},
       });
-      return json(res, 200, { ...result, url: `/#/work/${result.workId}` });
+      const job = targets.length ? startTranslateJob(result.workId, targets) : null;
+      return json(res, 200, { ...result, jobId: job?.id || null, url: `/#/work/${result.workId}` });
     }
     if (pathname === "/api/parse-file" && method === "POST") {
       const b = await readJson(req);
@@ -182,12 +241,14 @@ const server = createServer(async (req, res) => {
 
     if (pathname === "/api/works/bulk" && method === "POST") {
       const b = await readJson(req);
+      const targets = (b.autoTranslateTo || []).map(normalizeCode).filter(Boolean);
       const result = await bulkIngest(store, {
         title: b.title, author: b.author, sourceLang: normalizeCode(b.sourceLang || b.source || "auto"),
         sourceUrl: b.sourceUrl, volume: b.volume || "", text: b.text, chapters: b.chapters,
-        autoTranslateTo: (b.autoTranslateTo || []).map(normalizeCode), settings: b.settings || {},
+        autoTranslateTo: [], settings: b.settings || {},
       });
-      return json(res, 200, { ...result, url: `/#/work/${result.workId}` });
+      const job = targets.length ? startTranslateJob(result.workId, targets) : null;
+      return json(res, 200, { ...result, jobId: job?.id || null, url: `/#/work/${result.workId}` });
     }
     if (pathname === "/api/works/preview-split" && method === "POST") {
       const b = await readJson(req);
@@ -217,7 +278,9 @@ const server = createServer(async (req, res) => {
 
       if (seg[3] === "translate-all" && method === "POST") {
         const b = await readJson(req);
-        return json(res, 200, await translateWholeStory(store, { workId, target: normalizeCode(b.target), force: !!b.force }));
+        const targets = [normalizeCode(b.target || "en")];
+        const job = startTranslateJob(workId, targets, { force: !!b.force });
+        return json(res, 200, { jobId: job.id, workId, targets });
       }
 
       if (seg[3] === "terms" && seg.length === 4 && method === "GET") {

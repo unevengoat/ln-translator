@@ -174,22 +174,11 @@ export async function ingestText(store, {
   });
 
   if (result.created) {
+    // Fast, no model calls: Latin terms are canonical as-is. Language-specific
+    // terms are discovered later, per target language, during translation.
     const terms = await store.loadTerms(result.workId);
     result.termsAdded = mergeTerms(terms, TERM_REF_LANG, latinCandidates(norm).map((c) => ({ source: c, translation: c })));
     store.saveTerms(result.workId, terms);
-    try {
-      const key2 = process.env.GROQ_API_KEY || process.env.AI_API_KEY;
-      if (key2) {
-        const pairs = await extractTermsWithModel(norm, {
-          source: sourceLang || "auto", target: TERM_REF_LANG,
-          config: resolveProvider("groq", { model: PRIMARY.model, apiKey: key2 }), fetchFn,
-        });
-        result.termsAdded += mergeTerms(terms, TERM_REF_LANG, pairs);
-        store.saveTerms(result.workId, terms);
-      }
-    } catch (e) {
-      result.termExtraction = "skipped: " + e.message.slice(0, 120);
-    }
     await store.update((d) => { const w = d.works[result.workId]; if (w) w.terms = termCounts(terms); });
     await store.flush();
   }
