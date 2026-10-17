@@ -398,7 +398,7 @@ export async function getWork(store, workId) {
     .slice()
     .sort((a, b) => a.order - b.order)
     .map((v) => ({ ...v, chapterCount: chapters.filter((c) => (c.volumeKey || "") === v.key).length }))
-    .filter((v) => v.chapterCount > 0 || v.label);
+    .filter((v) => v.chapterCount > 0);
   return {
     ...work, chapters, volumes, terms,
     translatedCount: chapters.reduce((n, c) => n + c.translations.length, 0),
