@@ -100,8 +100,11 @@ async function serveStatic(req, res, overridePath) {
   try {
     const st = await stat(file);
     if (st.isDirectory()) throw new Error("dir");
-    const noCache = p === "/index.html" || p === "/sw.js";
-    res.writeHead(200, { "Content-Type": MIME[path.extname(file)] || "application/octet-stream", "Cache-Control": noCache ? "no-cache" : "public, max-age=300" });
+    // App shell files always revalidate so a deploy is picked up immediately;
+    // other assets can be cached briefly.
+    const ext = path.extname(file).toLowerCase();
+    const revalidate = [".html", ".js", ".css", ".webmanifest"].includes(ext) || p === "/sw.js";
+    res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream", "Cache-Control": revalidate ? "no-cache" : "public, max-age=300" });
     res.end(await readFile(file));
   } catch { res.writeHead(404); res.end("not found"); }
 }
