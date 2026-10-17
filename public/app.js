@@ -409,20 +409,32 @@ $("storySettingsBtn").onclick = async () => {
 async function loadTerms() {
   const data = await API(`/api/works/${currentWork.id}/terms?lang=${currentLang}`);
   window.__suggest = data;
-  $("terms").innerHTML = data.terms.length
-    ? data.terms.map((t) => `
+  window.__terms = data.terms || [];
+  renderTerms();
+}
+
+/** Show a filterable, capped list — a big story can have thousands of terms. */
+function renderTerms() {
+  const all = window.__terms || [];
+  const needle = ($("termSearch").value || "").trim().toLowerCase();
+  const list = needle ? all.filter((t) => t.source.toLowerCase().includes(needle) || (t.canonical || "").toLowerCase().includes(needle)) : all;
+  const CAP = 60;
+  $("termCount").textContent = `${all.length} term(s)${needle || list.length > CAP ? ` · showing ${Math.min(list.length, CAP)}` : ""}`;
+  $("terms").innerHTML = list.length
+    ? list.slice(0, CAP).map((t) => `
       <div class="term" data-source="${esc(t.source)}" data-canonical="${esc(t.canonical)}">
         <span class="src">${esc(t.source)}</span> → <strong>${esc(t.canonical)}</strong>
         <span class="hint">(${esc(t.origin)}${t.variants?.length ? " · seen: " + t.variants.map(esc).join(", ") : ""})</span>
         <button class="edit" type="button">Edit</button>
-      </div>`).join("")
-    : `<p class="hint">No terms recorded yet for ${esc(langName(currentLang))}. They appear as chapters are translated, or add one below.</p>`;
+      </div>`).join("") + (list.length > CAP ? `<p class="hint">…${list.length - CAP} more — use Find term to narrow the list.</p>` : "")
+    : `<p class="hint">${all.length ? "No term matches that filter." : `No terms recorded yet for ${esc(langName(currentLang))}. They appear as chapters are translated, or add one below.`}</p>`;
   document.querySelectorAll(".term .edit").forEach((b) => (b.onclick = () => {
     const t = b.closest(".term");
     $("termSource").value = t.dataset.source;
     $("termCanonical").value = t.dataset.canonical;
   }));
 }
+$("termSearch").oninput = renderTerms;
 
 function renderSuggestions() {
   const d = window.__suggest || { candidates: [], modelTerms: [] };
