@@ -340,7 +340,9 @@ async function doTranslate(force = false) {
   $("readerMeta").textContent = `Translating to ${langName(currentLang)} at ${LEVEL_LABEL[currentLevel]}…`;
   try {
     const r = await post(`/api/works/${currentWork.id}/chapters/${currentChapter}/translate`, { target: currentLang, difficulty: currentLevel, force });
-    toast(r.cached ? "Already done (from memory)" : `Translated ${r.chunks} chunks via ${r.provider}`, r.qa?.ok === false ? "warn" : "ok");
+    const job = await followJob(r.jobId, { label: `${langName(currentLang)} · ${LEVEL_LABEL[currentLevel]}` });
+    const res = job?.result || {};
+    toast(res.cached ? "Already done (from memory)" : `Translated ${res.chunks} chunks via ${res.provider}`, res.qa?.ok === false ? "warn" : "ok");
     currentWork = await API("/api/works/" + currentWork.id);
     fillVolumeSelect(); fillChapterSelect();
     await loadChapter();

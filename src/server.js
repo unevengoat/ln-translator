@@ -341,9 +341,17 @@ const server = createServer(async (req, res) => {
         if (seg.length === 5 && method === "DELETE") return json(res, 200, await deleteChapter(store, { workId, chapterId }));
         if (seg[5] === "translate" && method === "POST") {
           const b = await readJson(req);
-          return json(res, 200, await translateChapter(store, {
-            workId, chapterId, target: normalizeCode(b.target), difficulty: normalizeDifficulty(b.difficulty), force: !!b.force,
-          }));
+          const target = normalizeCode(b.target);
+          const level = normalizeDifficulty(b.difficulty);
+          const job = startJob("chapter", { workId, chapterId, targets: [target], difficulties: [level] });
+          job.total = 1;
+          runJob(job, async () => {
+            const r = await translateChapter(store, { workId, chapterId, target, difficulty: level, force: !!b.force });
+            job.done = 1;
+            job.current = `${target} (${level})`;
+            return { cached: r.cached, chunks: r.chunks, provider: r.provider, qa: r.qa, difficulty: r.difficulty };
+          });
+          return json(res, 202, { jobId: job.id, workId, chapterId, target, difficulty: level });
         }
         if (seg[5] === "versions" && seg[6] && seg[7] === "restore" && method === "POST") {
           return json(res, 200, await restoreVersion(store, { workId, chapterId, hash: decodeURIComponent(seg[6]) }));

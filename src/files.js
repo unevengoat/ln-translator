@@ -87,8 +87,26 @@ async function pdfToText(buf) {
   const pagesWithText = pageLines.filter((l) => l.length).length || 1;
   const isRunning = (t, counts) => (counts.get(t) || 0) / pagesWithText > 0.4 || /^\s*[\divxlcdm]{1,5}\s*$/i.test(t);
 
-  const out = [];
+  // Watermark / spam domains repeated on most pages (e.g. "Page 18some-site.com").
+  const domainCounts = new Map();
   for (const lines of pageLines) {
+    for (const l of lines) {
+      for (const m of l.text.matchAll(/\b[\w-]+(?:\.[\w-]+)*\.(?:com|net|org|io|me|co|ru|xyz|to)\b/gi)) {
+        domainCounts.set(m[0], (domainCounts.get(m[0]) || 0) + 1);
+      }
+    }
+  }
+  const spam = [...domainCounts].filter(([, c]) => c / pagesWithText > 0.25).map(([d]) => d);
+  const spamRe = spam.length ? new RegExp(`(?:Page\\s*\\d+\\s*)?(?:${spam.map((d) => d.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "gi") : null;
+  const cleanLine = (t) => {
+    let out = t;
+    if (spamRe) out = out.replace(spamRe, "");
+    return out.replace(/\s{2,}/g, " ").trim();
+  };
+
+  const out = [];
+  for (const rawLines of pageLines) {
+    const lines = rawLines.map((l) => ({ y: l.y, text: cleanLine(l.text) })).filter((l) => l.text);
     if (!lines.length) continue;
     const body = lines.filter((l, i) => !(i === 0 ? isRunning(l.text, firstCounts) : i === lines.length - 1 ? isRunning(l.text, lastCounts) : false));
     const use = body.length ? body : lines;

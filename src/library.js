@@ -90,9 +90,23 @@ export function splitChapters(text, { defaultVolume = "" } = {}) {
   }
   flush();
   const chapters = parts
-    .map((p, i) => ({ volume: p.volume, title: p.title || `Chapter ${i + 1}`, text: p.lines.join("\n").trim() }))
+    .map((p, i) => ({ volume: p.volume, title: chapterTitleFor(p, i), text: p.lines.join("\n").trim() }))
     .filter((c) => c.text);
   return chapters.length ? chapters : [{ volume: volumeLabel(defaultVolume), title: "", text: norm }];
+}
+
+/** Use the marker plus the chapter's own subtitle when the text has one. */
+function chapterTitleFor(part, index) {
+  const lines = part.lines.map((l) => l.trim()).filter(Boolean);
+  const marker = (part.title || "").trim();
+  const first = lines[0] || "";
+  if (/^copyright$/i.test(first) && !marker) return "Front Matter";
+  const looksLikeTitle = first.length <= 90 && first.split(/\s+/).length <= 12 && !/\.$/.test(first) && first !== marker;
+  const subtitle = looksLikeTitle ? first : "";
+  if (marker && subtitle) return `${marker} — ${subtitle.replace(/[!?]$/, "")}`;
+  if (marker) return marker;
+  if (subtitle) return subtitle;
+  return `Chapter ${index + 1}`;
 }
 
 /* ------------------------------------------------------------------- terms */
