@@ -407,7 +407,7 @@ export async function listWorks(store, { q = "", limit = 200 } = {}) {
     .map((w) => ({
       ...w,
       chapterCount: w.chapters.length,
-      volumeCount: (w.volumes || []).filter((v) => v.label).length,
+      volumeCount: (w.volumes || []).filter((v) => v.label && w.chapters.some((c) => (c.volumeKey || "") === v.key)).length,
       translatedCount: Object.values(db.translations).filter((t) => t.workId === w.id).length,
       warnings: Object.values(db.translations).filter((t) => t.workId === w.id && t.qa && !t.qa.ok).length,
     }));
