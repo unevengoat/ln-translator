@@ -60,7 +60,7 @@
         <label>Source URL <input id="sourceUrl" placeholder="optional — links re-uploads to the same story"></label>
       </div>
       <div class="row">
-        <label class="file">📄 Load file (.txt/.md/.html/.epub) <input id="uploadFile" type="file" accept=".txt,.md,.markdown,.html,.htm,.epub" hidden></label>
+        <label class="file">📄 Load file (.txt/.md/.html/.epub/.pdf) <input id="uploadFile" type="file" accept=".txt,.md,.markdown,.html,.htm,.epub,.pdf" hidden></label>
         <label class="engine"><input type="checkbox" id="autoSplit" checked> Auto-split volumes &amp; chapters</label>
         <label class="engine"><input type="checkbox" id="autoDetect" checked> Auto-detect language</label>
         <span id="uploadStats" class="hint"></span>
@@ -70,10 +70,15 @@
       </label>
       <div class="row">
         <button id="previewSplit" type="button">Preview split</button>
-        <span class="hint">Then translate into:</span>
+        <span class="hint">Translate into:</span>
         <span id="autoLangs" class="chips"></span>
       </div>
+      <div class="row">
+        <span class="hint">Reading level:</span>
+        <span id="autoLevels" class="chips"></span>
+      </div>
       <div id="splitPreview" class="hint"></div>
+      <div id="addHint" class="hint"></div>
       <div class="row">
         <button id="saveTranslate" class="primary">Save &amp; translate</button>
         <button id="saveOnly" type="button">Save only</button>
@@ -106,9 +111,16 @@
         <label id="volumeWrap" class="hidden">Volume <select id="volumeSelect"></select></label>
         <label>Chapter <select id="chapterSelect"></select></label>
         <button id="nextChapter" type="button">Next ›</button>
+      </div>
+      <div class="row">
         <label>Language <select id="langSelect"></select></label>
+        <label>Reading level <select id="difficultySelect">
+          <option value="easy">Easy — simple words &amp; short sentences</option>
+          <option value="medium" selected>Medium — natural novel style</option>
+          <option value="hard">Hard — advanced vocabulary &amp; grammar</option>
+        </select></label>
         <button id="translateBtn" type="button">Translate / ensure</button>
-        <button id="translateAllBtn" type="button">Translate whole story</button>
+        <button id="translateAllBtn" type="button">Translate whole story…</button>
       </div>
       <div class="row">
         <button id="showOriginal" type="button">Original</button>
@@ -116,17 +128,55 @@
         <button id="copyChapter" type="button">Copy</button>
         <button id="dlChapter" type="button">Download</button>
         <button id="shareChapter" type="button">Share link</button>
-        <label>Size <input id="fontSize" type="range" min="14" max="26" step="1" value="18"></label>
-        <label>Theme <select id="theme"><option value="auto">Auto</option><option value="light">Light</option><option value="sepia">Sepia</option><option value="dark">Dark</option></select></label>
       </div>
+      <details id="lookDetails">
+        <summary>Reading look — theme, font, size, spacing</summary>
+        <div class="row">
+          <label>Theme <select id="theme">
+            <option value="auto">Auto (system)</option>
+            <option value="light">Light</option>
+            <option value="sepia">Sepia</option>
+            <option value="parchment">Parchment</option>
+            <option value="solarized">Solarized</option>
+            <option value="rose">Rose</option>
+            <option value="dark">Dark</option>
+            <option value="slate">Slate</option>
+            <option value="forest">Forest</option>
+            <option value="night">Night (black)</option>
+          </select></label>
+          <label>Font <select id="fontFamily">
+            <option value="serif">Serif (book)</option>
+            <option value="sans">Sans (clean)</option>
+            <option value="dyslexic">Dyslexia-friendly</option>
+            <option value="mono">Monospace</option>
+          </select></label>
+          <label>Size <input id="fontSize" type="range" min="14" max="30" step="1" value="18"></label>
+          <label>Line spacing <select id="lineHeight">
+            <option value="1.4">Tight</option>
+            <option value="1.7" selected>Normal</option>
+            <option value="2.1">Wide</option>
+          </select></label>
+          <label>Width <select id="readWidth">
+            <option value="34rem">Narrow</option>
+            <option value="46rem" selected>Medium</option>
+            <option value="62rem">Wide</option>
+          </select></label>
+          <label class="chip"><input type="checkbox" id="justifyText"> Justify</label>
+        </div>
+      </details>
       <div id="readerMeta" class="hint"></div>
+      <div class="progress"><span id="progressBar"></span></div>
       <div id="warnBox" class="warns hidden"></div>
       <div id="readerPane" class="pane">
         <article id="readerBody" class="reader"></article>
         <article id="readerBody2" class="reader hidden"></article>
       </div>
+      <div class="bottom-nav">
+        <button id="prevChapterBottom" type="button">‹ Previous chapter</button>
+        <button id="nextChapterBottom" type="button">Next chapter ›</button>
+      </div>
       <div class="row">
-        <span class="hint">Shortcuts: ← / → chapters · t translate · o original · s side-by-side</span>
+        <span class="hint">Shortcuts: ← / → chapters · t translate · o original · s side-by-side · 1/2/3 reading level</span>
       </div>
     </div>
 

@@ -3,7 +3,44 @@
 // are visible without anyone having to re-read every chapter.
 
 const CJK = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]/g;
+const KANA_HANGUL = /[\u3040-\u30ff\uac00-\ud7af]/g;
 const CJK_TARGETS = new Set(["ja", "zh-CN", "zh-TW", "ko", "th", "my"]);
+
+/** Difficulty levels for the same chapter. Terms are shared; only wording changes. */
+export const DIFFICULTIES = ["easy", "medium", "hard"];
+export const DEFAULT_DIFFICULTY = "medium";
+
+export function normalizeDifficulty(d) {
+  const v = String(d || "").trim().toLowerCase();
+  if (v === "simple" || v === "beginner" || v === "a2") return "easy";
+  if (v === "advanced" || v === "c1" || v === "expert") return "hard";
+  if (v === "normal" || v === "standard" || v === "b1" || v === "b2" || !v) return "medium";
+  return DIFFICULTIES.includes(v) ? v : "medium";
+}
+
+/**
+ * Mechanical clean-up of leftover source artefacts in a non-CJK target:
+ * CJK quote brackets → target quotes, and stray kana/hangul (particles like と)
+ * removed. This runs after the model, and the lint below then re-checks.
+ */
+export function cleanTranslationArtifacts(text, target = "en") {
+  let out = String(text ?? "");
+  if (CJK_TARGETS.has(target)) return out;
+  out = out
+    .replace(/「/g, "\u201c").replace(/」/g, "\u201d")
+    .replace(/『/g, "\u2018").replace(/』/g, "\u2019")
+    .replace(/[、]/g, ", ").replace(/[。]/g, ".")
+    .replace(/[！]/g, "!").replace(/[？]/g, "?")
+    .replace(/[（]/g, " (").replace(/[）]/g, ")")
+    .replace(/[・]/g, " ");
+  // Single stray kana/hangul characters are always artefacts in a Latin target.
+  out = out.replace(/(^|[\s("'\u201c\u00ab])([\u3040-\u30ff\uac00-\ud7af]{1,2})(?=$|[\s)!"'\u201d\u00bb.,;:?])/g, "$1");
+  out = out.replace(KANA_HANGUL, "");
+  out = out.replace(/[ \t]{2,}/g, " ").replace(/ +([.,;:!?])/g, "$1");
+  // Broken quote at line starts ("and Asuna whispered" after a Japanese 「」と).
+  out = out.replace(/([?!.\u2026])\s*"\s*and ([A-Z][a-z]+(?: [A-Z][a-z]+)?) (whispered|said|asked|shouted|replied|murmured|cried|laughed|sighed|nodded)/g, '$1" $2 $3');
+  return out.trim();
+}
 
 export function lintTranslation(source, translation, { target = "en", glossary = [] } = {}) {
   const warnings = [];

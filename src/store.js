@@ -297,19 +297,22 @@ export class Store {
     return terms;
   }
 
-  /* ---- per-story translation memory ---- */
-  async loadTm(workId, lang) {
-    const key = `${workId}|${lang}`;
+  /* ---- per-story translation memory (per language AND reading level) ---- */
+  async loadTm(workId, lang, difficulty = "medium") {
+    const key = `${workId}|${lang}|${difficulty}`;
     if (this.tmCache.has(key)) return this.tmCache.get(key);
-    const raw = await this.backend.getText(`tm/${workId}__${lang}.json`).catch(() => null);
+    const file = difficulty === "medium" ? `tm/${workId}__${lang}.json` : `tm/${workId}__${lang}__${difficulty}.json`;
+    const raw = await this.backend.getText(file).catch(() => null);
     const tm = raw ? JSON.parse(raw) : {};
     this.tmCache.set(key, tm);
     return tm;
   }
 
-  saveTm(workId, lang, tm) {
-    this.tmCache.set(`${workId}|${lang}`, tm);
-    this._mark(`tm/${workId}__${lang}.json`, () => JSON.stringify(tm));
+  saveTm(workId, lang, tm, difficulty = "medium") {
+    const key = `${workId}|${lang}|${difficulty}`;
+    this.tmCache.set(key, tm);
+    const file = difficulty === "medium" ? `tm/${workId}__${lang}.json` : `tm/${workId}__${lang}__${difficulty}.json`;
+    this._mark(file, () => JSON.stringify(tm));
     return tm;
   }
 
@@ -323,7 +326,9 @@ export class Store {
     const tm = {};
     for (const w of Object.values(this.db.works)) {
       terms[w.id] = await this.loadTerms(w.id).catch(() => ({}));
-      for (const lang of new Set(w.languages || [])) tm[`${w.id}|${lang}`] = await this.loadTm(w.id, lang).catch(() => ({}));
+      for (const lang of new Set(w.languages || [])) {
+        for (const d of ["medium", "easy", "hard"]) tm[`${w.id}|${lang}|${d}`] = await this.loadTm(w.id, lang, d).catch(() => ({}));
+      }
     }
     return { format: "ln-translator-export", version: 1, exportedAt: Date.now(), backend: this.backendName, db: this.db, texts, terms, tm };
   }
@@ -371,10 +376,10 @@ export class Store {
       this.saveTerms(workId, current);
     }
     for (const [key, tm] of Object.entries(payload.tm || {})) {
-      const [workId, lang] = key.split("|");
-      const current = await this.loadTm(workId, lang);
+      const [workId, lang, difficulty = "medium"] = key.split("|");
+      const current = await this.loadTm(workId, lang, difficulty);
       for (const [h, v] of Object.entries(tm || {})) if (!current[h]) { current[h] = v; stats.tm++; }
-      this.saveTm(workId, lang, current);
+      this.saveTm(workId, lang, current, difficulty);
     }
     await this.flush();
     return stats;

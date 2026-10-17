@@ -13,7 +13,9 @@ import {
   ingestText, bulkIngest, workIdFor, listWorks, getWork, getChapter, translateChapter,
   correctTerm, suggestTerms, stats, searchLibrary, activityFeed, updateWork, deleteChapter, deleteWork,
   restoreVersion, importGlossary, exportGlossary, splitChapters, sortChapters,
+  DIFFICULTIES, DEFAULT_DIFFICULTY, cleanTranslationArtifacts,
 } from "./library.js";
+import { normalizeDifficulty } from "./qa.js";
 import { PRIMARY, BACKUP } from "./engines/models.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -45,27 +47,30 @@ function runJob(job, fn) {
   return job;
 }
 
-/** Translate every chapter of a story into each target language, as a job. */
-function startTranslateJob(workId, targets, { force = false } = {}) {
-  const job = startJob("translate", { workId, targets });
+/** Translate every chapter of a story into each target × reading level, as a job. */
+function startTranslateJob(workId, targets, { force = false, difficulties = [DEFAULT_DIFFICULTY] } = {}) {
+  const levels = difficulties.map(normalizeDifficulty);
+  const job = startJob("translate", { workId, targets, difficulties: levels });
   runJob(job, async () => {
     const db = await store.load();
     const work = db.works[workId];
     if (!work) throw new Error("Unknown story: " + workId);
     const chapters = sortChapters(work);
-    job.total = chapters.length * targets.length;
+    job.total = chapters.length * targets.length * levels.length;
     const results = [];
     for (const target of targets) {
-      for (const chapter of chapters) {
-        job.current = `${chapter.title} → ${target}`;
-        try {
-          const r = await translateChapter(store, { workId, chapterId: chapter.id, target, force });
-          results.push({ chapterId: chapter.id, target, ok: true, cached: r.cached });
-        } catch (e) {
-          results.push({ chapterId: chapter.id, target, ok: false, error: e.message.slice(0, 200) });
-          job.errors = [...(job.errors || []), `${chapter.title} → ${target}: ${e.message.slice(0, 120)}`];
+      for (const level of levels) {
+        for (const chapter of chapters) {
+          job.current = `${chapter.title} → ${target} (${level})`;
+          try {
+            const r = await translateChapter(store, { workId, chapterId: chapter.id, target, difficulty: level, force });
+            results.push({ chapterId: chapter.id, target, difficulty: level, ok: true, cached: r.cached });
+          } catch (e) {
+            results.push({ chapterId: chapter.id, target, difficulty: level, ok: false, error: e.message.slice(0, 200) });
+            job.errors = [...(job.errors || []), `${chapter.title} → ${target} (${level}): ${e.message.slice(0, 120)}`];
+          }
+          job.done++;
         }
-        job.done++;
       }
     }
     job.ok = results.filter((r) => r.ok).length;
@@ -152,7 +157,8 @@ const server = createServer(async (req, res) => {
 
     /* ---- meta / health ---- */
     if (method === "GET" && pathname === "/api") return json(res, 200, {
-      name: "LN Translator API", version: 2, storage: store.backendName,
+      name: "LN Translator API", version: 3, storage: store.backendName,
+      difficulties: DIFFICULTIES,
       models: { primary: `${PRIMARY.provider}/${PRIMARY.model}`, backup: `${BACKUP.provider}/${BACKUP.model}` },
       endpoints: [
         "GET /api/languages", "GET /api/providers", "GET /api/stats", "GET /api/health", "GET /api/activity",
@@ -245,10 +251,11 @@ const server = createServer(async (req, res) => {
     if (pathname === "/api/works/bulk" && method === "POST") {
       const b = await readJson(req);
       const targets = (b.autoTranslateTo || []).map(normalizeCode).filter(Boolean);
+      const levels = (b.difficulties?.length ? b.difficulties : [DEFAULT_DIFFICULTY]).map(normalizeDifficulty);
       const workId = await workIdFor(store, { title: b.title, author: b.author, sourceUrl: b.sourceUrl });
       // Ingest + translate as one background job so a whole volume can't time out.
-      const job = startJob("ingest", { workId, targets });
-      job.total = 1 + targets.length;
+      const job = startJob("ingest", { workId, targets, difficulties: levels });
+      job.total = 1 + targets.length * levels.length;
       runJob(job, async () => {
         const result = await bulkIngest(store, {
           title: b.title, author: b.author, sourceLang: normalizeCode(b.sourceLang || b.source || "auto"),
@@ -259,14 +266,16 @@ const server = createServer(async (req, res) => {
         job.done = 1;
         job.current = `saved ${result.chapters.length} chapter(s)`;
         for (const target of targets) {
-          for (const c of result.chapters) {
-            job.current = `${c.title} → ${target}`;
-            try { await translateChapter(store, { workId, chapterId: c.chapterId, target }); }
-            catch (e) { job.errors = [...(job.errors || []), `${c.title} → ${target}: ${e.message.slice(0, 120)}`]; }
+          for (const level of levels) {
+            for (const c of result.chapters) {
+              job.current = `${c.title} → ${target} (${level})`;
+              try { await translateChapter(store, { workId, chapterId: c.chapterId, target, difficulty: level }); }
+              catch (e) { job.errors = [...(job.errors || []), `${c.title} → ${target} (${level}): ${e.message.slice(0, 120)}`]; }
+            }
+            job.done++;
           }
-          job.done++;
         }
-        return { workId, chapters: result.chapters.length, targets };
+        return { workId, chapters: result.chapters.length, targets, difficulties: levels };
       });
       return json(res, 202, { jobId: job.id, workId, url: `/#/work/${workId}` });
     }
@@ -298,9 +307,10 @@ const server = createServer(async (req, res) => {
 
       if (seg[3] === "translate-all" && method === "POST") {
         const b = await readJson(req);
-        const targets = [normalizeCode(b.target || "en")];
-        const job = startTranslateJob(workId, targets, { force: !!b.force });
-        return json(res, 200, { jobId: job.id, workId, targets });
+        const targets = b.targets?.length ? b.targets.map(normalizeCode) : [normalizeCode(b.target || "en")];
+        const levels = (b.difficulties?.length ? b.difficulties : [b.difficulty || DEFAULT_DIFFICULTY]).map(normalizeDifficulty);
+        const job = startTranslateJob(workId, targets, { force: !!b.force, difficulties: levels });
+        return json(res, 200, { jobId: job.id, workId, targets, difficulties: levels });
       }
 
       if (seg[3] === "terms" && seg.length === 4 && method === "GET") {
@@ -325,13 +335,15 @@ const server = createServer(async (req, res) => {
       if (seg[3] === "chapters" && seg[4]) {
         const chapterId = seg[4];
         if (seg.length === 5 && method === "GET") {
-          const ch = await getChapter(store, { workId, chapterId, lang: normalizeCode(q.lang || "") });
+          const ch = await getChapter(store, { workId, chapterId, lang: normalizeCode(q.lang || ""), difficulty: q.difficulty || DEFAULT_DIFFICULTY });
           return ch ? json(res, 200, ch) : json(res, 404, { error: "Unknown chapter" });
         }
         if (seg.length === 5 && method === "DELETE") return json(res, 200, await deleteChapter(store, { workId, chapterId }));
         if (seg[5] === "translate" && method === "POST") {
           const b = await readJson(req);
-          return json(res, 200, await translateChapter(store, { workId, chapterId, target: normalizeCode(b.target), force: !!b.force }));
+          return json(res, 200, await translateChapter(store, {
+            workId, chapterId, target: normalizeCode(b.target), difficulty: normalizeDifficulty(b.difficulty), force: !!b.force,
+          }));
         }
         if (seg[5] === "versions" && seg[6] && seg[7] === "restore" && method === "POST") {
           return json(res, 200, await restoreVersion(store, { workId, chapterId, hash: decodeURIComponent(seg[6]) }));

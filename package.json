@@ -16,7 +16,8 @@
     "test": "node --test test/translator.test.js test/library.test.js test/storage.test.js test/ui.test.js"
   },
   "dependencies": {
-    "jszip": "^3.10.1"
+    "jszip": "^3.10.1",
+    "pdfjs-dist": "^6.4.299"
   },
   "license": "MIT"
 }

@@ -10,6 +10,14 @@ node_modules/
 data/
 *.log
 
+# Copyrighted source material — MUST NEVER be committed to this public repo
+*.pdf
+*.epub
+*.mobi
+*.azw3
+extracted/
+volumes/
+
 # OS
 Thumbs.db
 .DS_Store

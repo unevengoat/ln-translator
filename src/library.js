@@ -10,7 +10,7 @@ import {
   termsGlossary, mergeTerms, extractTermsWithModel, latinCandidates, termForms,
   termCounts, termsToCsv, parseCsv, parseGlossary,
 } from "./terms.js";
-import { lintTranslation, summarizeWarnings } from "./qa.js";
+import { lintTranslation, summarizeWarnings, cleanTranslationArtifacts, normalizeDifficulty, DEFAULT_DIFFICULTY, DIFFICULTIES } from "./qa.js";
 
 export const MAX_CHUNK = 1800;
 export const TERM_REF_LANG = "en"; // reference language for first-pass term discovery
@@ -238,21 +238,22 @@ export async function bulkIngest(store, {
 /* -------------------------------------------------------------- translation */
 
 export async function translateChapter(store, {
-  workId, chapterId, target, force = false, fetchFn = fetch, translate = translateWithPolicy, onProgress,
+  workId, chapterId, target, difficulty = DEFAULT_DIFFICULTY, force = false, fetchFn = fetch, translate = translateWithPolicy, onProgress,
 } = {}) {
   if (!target) throw new Error("A target language is required.");
+  const level = normalizeDifficulty(difficulty);
   const db0 = await store.load();
   const work = db0.works[workId];
   if (!work) throw new Error("Unknown story: " + workId);
   const chapter = work.chapters.find((c) => c.id === chapterId);
   if (!chapter) throw new Error("Unknown chapter: " + chapterId);
-  if (target === work.lang) throw new Error("Source and target languages are the same.");
+  const sameLanguage = target === work.lang; // allowed: rewrite/simplify in the same language
 
   await ensureTermsForLang(store, workId, target, { fetchFn });
   const settings = { ...DEFAULT_SETTINGS, ...(work.settings || {}) };
   const terms = await store.loadTerms(workId);
   const glossary = termsGlossary(terms, target);
-  const tm = await store.loadTm(workId, target);
+  const tm = await store.loadTm(workId, target, level);
   const text = await store.loadText(chapter.sourceHash);
   const chunks = chunkNovel(normalizeText(text), MAX_CHUNK);
 
@@ -272,13 +273,15 @@ export async function translateChapter(store, {
     const r = await translate(chunks[i], {
       source: work.lang, target, glossary, prevTail: results[i - 1]?.slice(-500) || "",
       pinned, fetchFn, keepHonorifics: settings.keepHonorifics, formality: settings.formality, notes: settings.notes,
+      difficulty: level, sameLanguage,
     });
-    results[i] = r.text.trim();
+    // Strip leftover source artefacts (stray と, 「」 …) before storing/linting.
+    results[i] = cleanTranslationArtifacts(r.text.trim(), target);
     warnings.push(...lintTranslation(chunks[i], results[i], { target, glossary }));
     provider = `${r.provider}/${r.model}`;
     pinned = { provider: r.provider, model: r.model };
-    tm[sha256(chunks[i])] = { text: results[i], at: Date.now() };
-    store.saveTm(workId, target, tm);
+    tm[sha256(chunks[i])] = { text: results[i], at: Date.now(), difficulty: level };
+    store.saveTm(workId, target, tm, level);
     await store.update((db) => {
       const w = db.works[workId];
       if (!w) return;
@@ -294,41 +297,45 @@ export async function translateChapter(store, {
 
   const translation = results.filter((v) => v !== undefined).join("\n\n");
   const hash = await store.saveText(translation);
-  const tkey = `${workId}|${chapterId}|${target}`;
+  const tkey = `${workId}|${chapterId}|${target}|${level}`;
   await store.update((db) => {
     const w = db.works[workId];
     db.translations[tkey] = {
-      key: tkey, workId, chapterId, target, hash, chunks: chunks.length, at: Date.now(),
+      key: tkey, workId, chapterId, target, difficulty: level, hash, chunks: chunks.length, at: Date.now(),
       provider, warnings, qa: summarizeWarnings(warnings),
     };
     if (w) {
       w.languages = [...new Set([...w.languages, target])];
       w.updatedAt = Date.now();
-      w.tmSegments = { ...(w.tmSegments || {}), [target]: Object.keys(tm).length };
+      const tk = `${target}|${level}`;
+      w.tmSegments = { ...(w.tmSegments || {}), [tk]: Object.keys(tm).length };
     }
-    logActivity(db, { type: "translated", workId, chapterId, lang: target, detail: `${chapter.title} → ${target}` });
+    logActivity(db, { type: "translated", workId, chapterId, lang: target, detail: `${chapter.title} → ${target} (${level})` });
   });
   await store.flush();
-  return { translation, chunks: chunks.length, cached: todo.length === 0, provider, warnings, qa: summarizeWarnings(warnings) };
+  return { translation, chunks: chunks.length, cached: todo.length === 0, provider, difficulty: level, warnings, qa: summarizeWarnings(warnings) };
 }
 
-/** Translate every chapter of a story into a language (resumable, keeps going). */
-export async function translateWholeStory(store, { workId, target, force = false, fetchFn = fetch, translate = translateWithPolicy, onProgress } = {}) {
+/** Translate chapters into one or more languages × reading levels (job-friendly). */
+export async function translateWholeStory(store, { workId, target, difficulties = [DEFAULT_DIFFICULTY], force = false, fetchFn = fetch, translate = translateWithPolicy, onProgress } = {}) {
   const db = await store.load();
   const work = db.works[workId];
   if (!work) throw new Error("Unknown story: " + workId);
-  const chapters = [...work.chapters].sort((a, b) => a.index - b.index);
+  const chapters = sortChapters(work);
+  const levels = difficulties.map(normalizeDifficulty);
   const out = [];
-  for (let i = 0; i < chapters.length; i++) {
-    try {
-      const r = await translateChapter(store, { workId, chapterId: chapters[i].id, target, force, fetchFn, translate });
-      out.push({ chapterId: chapters[i].id, title: chapters[i].title, ok: true, cached: r.cached, qa: r.qa });
-    } catch (e) {
-      out.push({ chapterId: chapters[i].id, title: chapters[i].title, ok: false, error: e.message.slice(0, 200) });
+  for (const level of levels) {
+    for (const chapter of chapters) {
+      try {
+        const r = await translateChapter(store, { workId, chapterId: chapter.id, target, difficulty: level, force, fetchFn, translate });
+        out.push({ chapterId: chapter.id, title: chapter.title, difficulty: level, ok: true, cached: r.cached, qa: r.qa });
+      } catch (e) {
+        out.push({ chapterId: chapter.id, title: chapter.title, difficulty: level, ok: false, error: e.message.slice(0, 200) });
+      }
+      onProgress?.({ done: out.length, total: chapters.length * levels.length, title: chapter.title, difficulty: level });
     }
-    onProgress?.({ done: i + 1, total: chapters.length, title: chapters[i].title });
   }
-  return { target, chapters: out, ok: out.filter((c) => c.ok).length, failed: out.filter((c) => !c.ok).length };
+  return { target, difficulties: levels, chapters: out, ok: out.filter((c) => c.ok).length, failed: out.filter((c) => !c.ok).length };
 }
 
 /* ------------------------------------------------------------------- reads */
@@ -358,6 +365,7 @@ export async function getWork(store, workId) {
     return {
       ...c,
       translations: trs.map((t) => t.target),
+      variants: trs.map((t) => ({ lang: t.target, difficulty: t.difficulty || "medium" })),
       versionCount: c.versions?.length || 1,
       warnings: trs.reduce((n, t) => n + (t.qa?.warns || 0) + (t.qa?.errors || 0), 0),
       qa: trs.map((t) => ({ lang: t.target, warnings: t.warnings || [], qa: t.qa })).filter((t) => t.warnings?.length),
@@ -376,7 +384,8 @@ export async function getWork(store, workId) {
   };
 }
 
-export async function getChapter(store, { workId, chapterId, lang = "" }) {
+export async function getChapter(store, { workId, chapterId, lang = "", difficulty = DEFAULT_DIFFICULTY } = {}) {
+  const level = normalizeDifficulty(difficulty);
   const db = await store.load();
   const work = db.works[workId];
   if (!work) return null;
@@ -384,14 +393,20 @@ export async function getChapter(store, { workId, chapterId, lang = "" }) {
   if (!chapter) return null;
   const original = await store.loadText(chapter.sourceHash).catch(() => "");
   const recs = Object.values(db.translations).filter((t) => t.chapterId === chapter.id);
-  const available = recs.map((t) => t.target);
+  const available = recs.map((t) => ({ lang: t.target, difficulty: t.difficulty || "medium" }));
   let translation = null;
   let record = null;
-  if (lang && lang !== work.lang) {
-    const rec = db.translations[`${workId}|${chapter.id}|${lang}`];
-    if (rec) {
-      translation = await store.loadText(rec.hash).catch(() => null);
-      record = { provider: rec.provider, at: rec.at, warnings: rec.warnings || [], qa: rec.qa };
+  if (lang) {
+    // exact level first, else the same language at another level (so the reader
+    // still shows something instead of a blank page)
+    const exact = db.translations[`${workId}|${chapter.id}|${lang}|${level}`];
+    const fallback = exact || recs.find((t) => t.target === lang);
+    if (fallback) {
+      translation = await store.loadText(fallback.hash).catch(() => null);
+      record = {
+        provider: fallback.provider, at: fallback.at, warnings: fallback.warnings || [],
+        qa: fallback.qa, difficulty: fallback.difficulty || "medium", exact: !!exact,
+      };
     }
   }
   const chapters = sortChapters(work);
@@ -515,7 +530,7 @@ export async function deleteWork(store, { workId }) {
     return work;
   });
   store.saveTerms(workId, {});
-  for (const lang of removed.languages || []) store.saveTm(workId, lang, {});
+  for (const lang of removed.languages || []) for (const level of DIFFICULTIES) store.saveTm(workId, lang, {}, level);
   await store.flush();
   return { id: removed.id, title: removed.title };
 }
@@ -565,16 +580,20 @@ export async function correctTerm(store, { workId, lang, source, canonical, form
     return out;
   };
 
-  // 1. translation memory for this story+language
-  const tm = await store.loadTm(workId, lang);
+  // 1. translation memory for this story+language — across EVERY reading level,
+  //    so easy/medium/hard all keep the same names.
   let tmRewrites = 0;
-  for (const [h, v] of Object.entries(tm)) {
-    const next = replace(v.text);
-    if (next !== v.text) { tm[h] = { ...v, text: next, at: Date.now() }; tmRewrites++; }
+  for (const level of DIFFICULTIES) {
+    const tm = await store.loadTm(workId, lang, level);
+    let changed = false;
+    for (const [h, v] of Object.entries(tm)) {
+      const next = replace(v.text);
+      if (next !== v.text) { tm[h] = { ...v, text: next, at: Date.now() }; tmRewrites++; changed = true; }
+    }
+    if (changed) store.saveTm(workId, lang, tm, level);
   }
-  if (tmRewrites) store.saveTm(workId, lang, tm);
 
-  // 2. every saved chapter translation in that language
+  // 2. every saved chapter translation in that language (all levels)
   const db = await store.load();
   let chapterRewrites = 0;
   const rewrites = [];
@@ -627,7 +646,7 @@ export async function suggestTerms(store, { workId, lang = "en", fetchFn = fetch
   };
 }
 
-export { termsToCsv, parseCsv, parseGlossary };
+export { termsToCsv, parseCsv, parseGlossary, DIFFICULTIES, DEFAULT_DIFFICULTY, cleanTranslationArtifacts };
 
 /** Parse a glossary paste: JSON, "a=b" lines, or CSV with or without a header. */
 export function parseTermInput(input) {

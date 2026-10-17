@@ -39,12 +39,16 @@ describe("glossary", () => {
 });
 
 describe("prompt", () => {
-  it("includes honorific, glossary and story notes", () => {
-    const sys = buildSystemPrompt({ sourceName: "Japanese", targetName: "English", keepHonorifics: true, glossary: [{ source: "a", target: "b" }], notes: "cold tone" });
+  it("includes honorific, glossary, story notes and the reading level", () => {
+    const sys = buildSystemPrompt({ sourceName: "Japanese", targetName: "English", keepHonorifics: true, glossary: [{ source: "a", target: "b" }], notes: "cold tone", difficulty: "easy" });
     assert.match(sys, /honorific/i);
     assert.match(sys, /GLOSSARY/);
     assert.match(sys, /cold tone/);
-    assert.match(sys, /ONLY the translation/);
+    assert.match(sys, /READING LEVEL — EASY/);
+    assert.match(sys, /IDENTICAL at every reading level/);
+    assert.match(sys, /NEVER leave any source-script character/);
+    const hard = buildSystemPrompt({ sourceName: "Japanese", targetName: "German", difficulty: "hard" });
+    assert.match(hard, /READING LEVEL — HARD/);
   });
   it("attaches previous tail for continuity", () => {
     assert.match(buildUserMessage("new chunk", "prev"), /continuity/);

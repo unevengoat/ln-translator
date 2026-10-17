@@ -10,7 +10,7 @@ export function resolveAiConfig(opts = {}) {
   return { temperature: 0.3, ...cfg, ...clean, headers: cfg.headers };
 }
 
-export async function translateAiChunk(chunk, { source = "auto", target = "en", keepHonorifics = true, formality = "match", glossary = [], prevTail = "", notes = "", config, fetchFn = fetch }) {
+export async function translateAiChunk(chunk, { source = "auto", target = "en", keepHonorifics = true, formality = "match", glossary = [], prevTail = "", notes = "", difficulty = "medium", sameLanguage = false, config, fetchFn = fetch }) {
   const cfg = config || resolveAiConfig({});
   const system = buildSystemPrompt({
     sourceName: languageName(source),
@@ -19,6 +19,8 @@ export async function translateAiChunk(chunk, { source = "auto", target = "en", 
     formality,
     glossary,
     notes,
+    difficulty,
+    sameLanguage,
   });
   const res = await fetchFn(`${cfg.baseUrl}/chat/completions`, {
     method: "POST",

@@ -10,7 +10,7 @@ import {
   deleteChapter, deleteWork, restoreVersion, suggestTerms, importGlossary, exportGlossary, parseTermInput,
 } from "../src/library.js";
 import { mergeTerms, termsGlossary, canonicalFor, extractCandidates, termsToCsv, termCounts } from "../src/terms.js";
-import { lintTranslation, summarizeWarnings } from "../src/qa.js";
+import { lintTranslation, summarizeWarnings, normalizeDifficulty, cleanTranslationArtifacts, DIFFICULTIES } from "../src/qa.js";
 import { isModelGone, pickCandidates, translateWithPolicy } from "../src/engines/models.js";
 
 let dir, store;
@@ -102,6 +102,98 @@ describe("volumes", () => {
     const r = await bulkIngest(store, { title: "Labeled Vol", sourceLang: "ja", volume: "Volume 3", text: "キリトは歩いた。", translate: t });
     const work = await getWork(store, r.workId);
     assert.equal(work.chapters[0].volume, "Volume 3");
+  });
+});
+
+describe("reading levels (difficulty)", () => {
+  it("normalises level names", () => {
+    assert.equal(normalizeDifficulty("simple"), "easy");
+    assert.equal(normalizeDifficulty("advanced"), "hard");
+    assert.equal(normalizeDifficulty(""), "medium");
+    assert.equal(normalizeDifficulty(undefined), "medium");
+    assert.deepEqual(DIFFICULTIES, ["easy", "medium", "hard"]);
+  });
+
+  it("keeps easy/medium/hard as separate translations with the SAME terms", async () => {
+    const seen = [];
+    const t = async (chunk, o) => {
+      seen.push({ difficulty: o.difficulty, glossary: (o.glossary || []).map((g) => g.target).join(",") });
+      return { text: `[${o.target}/${o.difficulty}] ${chunk}`, provider: "groq", model: "m" };
+    };
+    const a = await ingestText(store, { title: "Levels", sourceLang: "ja", text: "キリトは剣を抜いた。", translate: t });
+    const terms = await store.loadTerms(a.workId);
+    mergeTerms(terms, "de", [{ source: "キリト", translation: "Kirito" }]);
+    store.saveTerms(a.workId, terms);
+    await store.update((d) => { d.works[a.workId].termExtracted = { de: true }; });
+
+    const easy = await translateChapter(store, { workId: a.workId, chapterId: a.chapterId, target: "de", difficulty: "easy", translate: t });
+    const hard = await translateChapter(store, { workId: a.workId, chapterId: a.chapterId, target: "de", difficulty: "hard", translate: t });
+    assert.equal(easy.difficulty, "easy");
+    assert.match(easy.translation, /\[de\/easy\]/);
+    assert.match(hard.translation, /\[de\/hard\]/);
+    assert.notEqual(easy.translation, hard.translation, "levels must not share output");
+
+    // the glossary handed to the model is identical at every level
+    const glossaries = [...new Set(seen.map((s) => s.glossary))];
+    assert.deepEqual(glossaries, ["Kirito"]);
+    assert.deepEqual([...new Set(seen.map((s) => s.difficulty))].sort(), ["easy", "hard"]);
+
+    // both levels are stored and listed
+    const work = await getWork(store, a.workId);
+    const levels = work.chapters[0].variants.filter((v) => v.lang === "de").map((v) => v.difficulty).sort();
+    assert.deepEqual(levels, ["easy", "hard"]);
+
+    // level memory is separate: easy is cached, hard still needs work
+    const t2 = async (chunk, o) => ({ text: `[${o.target}/${o.difficulty}] ${chunk}`, provider: "groq", model: "m" });
+    const easyAgain = await translateChapter(store, { workId: a.workId, chapterId: a.chapterId, target: "de", difficulty: "easy", translate: t2 });
+    assert.equal(easyAgain.cached, true);
+  });
+
+  it("reads a chapter at a specific level, falling back to another level", async () => {
+    const t = async (chunk, o) => ({ text: `[${o.target}/${o.difficulty}]`, provider: "groq", model: "m" });
+    const a = await ingestText(store, { title: "Level Read", sourceLang: "ja", text: "本文です。", translate: t });
+    await translateChapter(store, { workId: a.workId, chapterId: a.chapterId, target: "sv", difficulty: "medium", translate: t });
+    const exact = await getChapter(store, { workId: a.workId, chapterId: a.chapterId, lang: "sv", difficulty: "medium" });
+    assert.equal(exact.record.exact, true);
+    const fallback = await getChapter(store, { workId: a.workId, chapterId: a.chapterId, lang: "sv", difficulty: "hard" });
+    assert.equal(fallback.record.exact, false);
+    assert.equal(fallback.record.difficulty, "medium");
+    assert.ok(fallback.translation);
+  });
+
+  it("a term correction updates EVERY level of that language", async () => {
+    const t = async (chunk, o) => ({ text: `${o.difficulty} Kirito hit`, provider: "groq", model: "m" });
+    const a = await ingestText(store, { title: "Level Fix", sourceLang: "ja", text: "キリトは打った。", translate: t });
+    const terms = await store.loadTerms(a.workId);
+    mergeTerms(terms, "en", [{ source: "キリト", translation: "Kirito" }]);
+    store.saveTerms(a.workId, terms);
+    await store.update((d) => { d.works[a.workId].termExtracted = { en: true }; });
+    await translateChapter(store, { workId: a.workId, chapterId: a.chapterId, target: "en", difficulty: "easy", translate: t });
+    await translateChapter(store, { workId: a.workId, chapterId: a.chapterId, target: "en", difficulty: "hard", translate: t });
+    const r = await correctTerm(store, { workId: a.workId, lang: "en", source: "キリト", canonical: "Keith" });
+    assert.equal(r.chapterRewrites, 2, "both levels rewritten");
+    for (const level of ["easy", "hard"]) {
+      const ch = await getChapter(store, { workId: a.workId, chapterId: a.chapterId, lang: "en", difficulty: level });
+      assert.match(ch.translation, /Keith/);
+      assert.doesNotMatch(ch.translation, /Kirito/);
+    }
+  });
+});
+
+describe("leftover-artifact cleanup", () => {
+  it("removes stray kana particles and converts Japanese quotes", () => {
+    assert.equal(cleanTranslationArtifacts("Kirito drew his sword. \u3068", "es"), "Kirito drew his sword.");
+    assert.equal(cleanTranslationArtifacts("\u300c\u00a1Vamos!\u300d dijo Asuna.", "es"), "\u201c\u00a1Vamos!\u201d dijo Asuna.");
+    assert.doesNotMatch(cleanTranslationArtifacts("dijo Asuna \u3068", "es"), /[\u3040-\u30ff]/);
+  });
+  it("leaves a CJK target untouched", () => {
+    assert.equal(cleanTranslationArtifacts("彼は剣を抜いた。", "ja"), "彼は剣を抜いた。");
+  });
+  it("a cleaned translation no longer trips the lint", () => {
+    const out = cleanTranslationArtifacts("Kirito walked. \u3068", "en");
+    const w = lintTranslation("キリトは歩いた。", out, { target: "en", glossary: [{ source: "キリト", target: "Kirito" }] });
+    assert.equal(summarizeWarnings(w).errors, 0);
+    assert.ok(!w.some((x) => x.code === "source-script"));
   });
 });
 

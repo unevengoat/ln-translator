@@ -82,6 +82,7 @@ export async function translateWithPolicy(chunk, opts = {}) {
   const {
     source = "auto", target = "en", keepHonorifics = true, formality = "match",
     glossary = [], prevTail = "", pinned = null, notes = "",
+    difficulty = "medium", sameLanguage = false,
     fetchFn = fetch, timeoutMs = 120000,
   } = opts;
   const legs = [];
@@ -111,7 +112,7 @@ export async function translateWithPolicy(chunk, opts = {}) {
       try {
         const config = resolveProvider(leg.provider, { model, apiKey, timeoutMs });
         const text = await callWithRetry(() =>
-          translateAiChunk(chunk, { source, target, keepHonorifics, formality, glossary, prevTail, notes, config, fetchFn })
+          translateAiChunk(chunk, { source, target, keepHonorifics, formality, glossary, prevTail, notes, difficulty, sameLanguage, config, fetchFn })
         );
         attempts.push({ provider: `${leg.provider}/${model}`, ok: true });
         return { text, provider: leg.provider, model, attempts };
