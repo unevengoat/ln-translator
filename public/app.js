@@ -110,7 +110,7 @@ async function loadHealth() {
       `<p>Storage: <strong>${esc(h.storageDescription)}</strong> (${esc(h.storage)})</p>` +
       `<p>Models: Groq ${h.keys.groq ? "✅ primary" : "❌ missing"} · Gemini ${h.keys.gemini ? "✅ backup ready" : "— not set"}</p>` +
       `<p>${h.stats.works} stories · ${h.stats.volumes || 0} volumes · ${h.stats.chapters} chapters · ${h.stats.translations} translations · ${h.stats.terms} terms · ${h.stats.tmSegments} memory segments · ${h.stats.calls} model calls · ${h.stats.warnings} QA warnings</p>`;
-    const s = h.storage;
+    const s = h.storageInfo;
     if (s && s.provider === "github") {
       const broad = s.broadToken;
       $("tokenBox").innerHTML =

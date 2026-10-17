@@ -164,9 +164,9 @@ const server = createServer(async (req, res) => {
     });
     if (method === "GET" && pathname === "/api/health") {
       const s = await stats(store);
-      const storage = store.backend?.info ? await store.backend.info().catch(() => null) : null;
+      const storageInfo = store.backend?.info ? await store.backend.info().catch(() => null) : null;
       return json(res, 200, {
-        ok: true, at: Date.now(), storage: store.backendName, storageDescription: store.describe(), storage,
+        ok: true, at: Date.now(), storage: store.backendName, storageDescription: store.describe(), storageInfo,
         keys: { groq: !!process.env.GROQ_API_KEY, gemini: !!process.env.GEMINI_API_KEY },
         editTokenRequired: !!EDIT_TOKEN, stats: s,
       });
