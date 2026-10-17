@@ -48,7 +48,8 @@ async function serveStatic(req, res, overridePath) {
   try {
     const st = await stat(file);
     if (st.isDirectory()) throw new Error("dir");
-    res.writeHead(200, { "Content-Type": MIME[path.extname(file)] || "application/octet-stream", "Cache-Control": p === "/index.html" ? "no-cache" : "public, max-age=300" });
+    const noCache = p === "/index.html" || p === "/sw.js";
+    res.writeHead(200, { "Content-Type": MIME[path.extname(file)] || "application/octet-stream", "Cache-Control": noCache ? "no-cache" : "public, max-age=300" });
     res.end(await readFile(file));
   } catch { res.writeHead(404); res.end("not found"); }
 }
