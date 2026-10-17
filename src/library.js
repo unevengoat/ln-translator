@@ -101,7 +101,7 @@ function chapterTitleFor(part, index) {
   const marker = (part.title || "").trim();
   const first = lines[0] || "";
   if (/^copyright$/i.test(first) && !marker) return "Front Matter";
-  const looksLikeTitle = first.length <= 90 && first.split(/\s+/).length <= 12 && !/\.$/.test(first) && first !== marker;
+  const looksLikeTitle = first.length <= 90 && first.split(/\s+/).length <= 12 && !/[.。]$/.test(first) && first !== marker;
   const subtitle = looksLikeTitle ? first : "";
   if (marker && subtitle) return `${marker} — ${subtitle.replace(/[!?]$/, "")}`;
   if (marker) return marker;
