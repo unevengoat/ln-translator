@@ -44,7 +44,9 @@ const newWork = (id, { title, author, sourceLang, sourceUrl }) => ({
 
 // Note: no \b — it never matches after a CJK character (話 is not a "word" char).
 const CHAPTER_MARKER = /^\s*(?:第\s*\d+\s*[章話话節节回]|chapter\s+\d+|ch\.?\s*\d+)(?:[\s:：.。\-—]|$)/i;
-const VOLUME_MARKER = /^\s*(?:(?:volume|vol\.?|book)\s*\d+(?:[\s:：.\-—]|$)|\d+\s*巻(?:[\s:：.。\-—]|$)|第\s*\d+\s*[巻卷](?:[\s:：.。\-—]|$))/i;
+// A volume marker must be a short standalone line — otherwise prose like
+// "Volume 5 completely stagnated..." would be mistaken for a volume heading.
+const VOLUME_MARKER = /^\s*(?:(?:volume|vol\.?|book)\s*\d+|第\s*\d+\s*[巻卷]|\d+\s*巻)\s*[:：.\-—]?\s*\S{0,25}\s*$/i;
 
 export const volumeLabel = (v) => String(v ?? "").trim();
 export const volumeKeyOf = (label) => volumeLabel(label).replace(/\s+/g, " ").toLowerCase();
@@ -119,7 +121,7 @@ export async function ensureTermsForLang(store, workId, lang, { fetchFn = fetch 
   const sample = await store.loadText(work.chapters[0]?.sourceHash || "").catch(() => "");
   const terms = await store.loadTerms(workId);
   // Latin originals are canonical in every language — cheap, always applied.
-  let added = mergeTerms(terms, lang, latinCandidates(sample).map((c) => ({ source: c, translation: c })));
+  let added = mergeTerms(terms, lang, latinCandidates(sample).slice(0, 200).map((c) => ({ source: c, translation: c })));
   const key = process.env.GROQ_API_KEY || process.env.AI_API_KEY;
   if (key && sample) {
     try {
@@ -197,7 +199,7 @@ export async function ingestText(store, {
     // Fast, no model calls: Latin terms are canonical as-is. Language-specific
     // terms are discovered later, per target language, during translation.
     const terms = await store.loadTerms(result.workId);
-    result.termsAdded = mergeTerms(terms, TERM_REF_LANG, latinCandidates(norm).map((c) => ({ source: c, translation: c })));
+    result.termsAdded = mergeTerms(terms, TERM_REF_LANG, latinCandidates(norm).slice(0, 200).map((c) => ({ source: c, translation: c })));
     store.saveTerms(result.workId, terms);
     await store.update((d) => { const w = d.works[result.workId]; if (w) w.terms = termCounts(terms); });
     if (flush) await store.flush();
@@ -266,7 +268,13 @@ export async function translateChapter(store, {
   await ensureTermsForLang(store, workId, target, { fetchFn });
   const settings = { ...DEFAULT_SETTINGS, ...(work.settings || {}) };
   const terms = await store.loadTerms(workId);
-  const glossary = termsGlossary(terms, target);
+  const allGlossary = termsGlossary(terms, target);
+  // Only the terms that actually occur in a chunk go into its prompt, so a big
+  // story's glossary never bloats (or confuses) the model.
+  const glossaryFor = (chunkText) => {
+    const hit = allGlossary.filter((g) => chunkText.includes(g.source));
+    return hit.length ? hit : allGlossary.slice(0, 40);
+  };
   const tm = await store.loadTm(workId, target, level);
   const text = await store.loadText(chapter.sourceHash);
   const chunks = chunkNovel(normalizeText(text), MAX_CHUNK);
@@ -285,13 +293,13 @@ export async function translateChapter(store, {
   for (let n = 0; n < todo.length; n++) {
     const i = todo[n];
     const r = await translate(chunks[i], {
-      source: work.lang, target, glossary, prevTail: results[i - 1]?.slice(-500) || "",
+      source: work.lang, target, glossary: glossaryFor(chunks[i]), prevTail: results[i - 1]?.slice(-500) || "",
       pinned, fetchFn, keepHonorifics: settings.keepHonorifics, formality: settings.formality, notes: settings.notes,
       difficulty: level, sameLanguage,
     });
     // Strip leftover source artefacts (stray と, 「」 …) before storing/linting.
     results[i] = cleanTranslationArtifacts(r.text.trim(), target);
-    warnings.push(...lintTranslation(chunks[i], results[i], { target, glossary }));
+    warnings.push(...lintTranslation(chunks[i], results[i], { target, glossary: glossaryFor(chunks[i]) }));
     provider = `${r.provider}/${r.model}`;
     pinned = { provider: r.provider, model: r.model };
     tm[sha256(chunks[i])] = { text: results[i], at: Date.now(), difficulty: level };
