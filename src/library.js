@@ -118,7 +118,15 @@ export async function ensureTermsForLang(store, workId, lang, { fetchFn = fetch 
   const db = await store.load();
   const work = db.works[workId];
   if (!work || work.termExtracted?.[lang]) return 0;
-  const sample = await store.loadText(work.chapters[0]?.sourceHash || "").catch(() => "");
+  // Sample the first few chapters (bounded) so names from later chapters are
+  // covered too — using only chapter 1 left most of a book with English-only terms.
+  const sampleChapters = sortChapters(work).slice(0, 3);
+  let sample = "";
+  for (const c of sampleChapters) {
+    sample += (await store.loadText(c.sourceHash).catch(() => "")) + "\n\n";
+    if (sample.length > 14000) break;
+  }
+  sample = sample.slice(0, 14000);
   const terms = await store.loadTerms(workId);
   // Latin originals are canonical in every language — cheap, always applied.
   let added = mergeTerms(terms, lang, latinCandidates(sample).slice(0, 200).map((c) => ({ source: c, translation: c })));
@@ -141,6 +149,23 @@ export async function ensureTermsForLang(store, workId, lang, { fetchFn = fetch 
     } catch { /* leave unset so a later request retries */ }
   }
   return added;
+}
+
+/** Delete a single term (a typo/junk entry) from a story's glossary. */
+export async function deleteTerm(store, { workId, source } = {}) {
+  if (!workId || !source) throw new Error("workId and source are required.");
+  const terms = await store.loadTerms(workId);
+  const key = Object.keys(terms).find((k) => k === source) || Object.keys(terms).find((k) => k.toLowerCase() === String(source).toLowerCase());
+  if (!key) throw new Error("Unknown term.");
+  delete terms[key];
+  store.saveTerms(workId, terms);
+  await store.update((d) => {
+    const w = d.works[workId];
+    if (w) { w.terms = termCounts(terms); w.updatedAt = Date.now(); }
+    logActivity(d, { type: "term-deleted", workId, detail: key });
+  });
+  await store.flush();
+  return { deleted: key, remaining: Object.keys(terms).length };
 }
 
 /* ------------------------------------------------------------------ ingest */
@@ -272,10 +297,7 @@ export async function translateChapter(store, {
   const allGlossary = termsGlossary(terms, target);
   // Only the terms that actually occur in a chunk go into its prompt, so a big
   // story's glossary never bloats (or confuses) the model.
-  const glossaryFor = (chunkText) => {
-    const hit = allGlossary.filter((g) => chunkText.includes(g.source));
-    return hit.length ? hit : allGlossary.slice(0, 40);
-  };
+  const glossaryFor = (chunkText) => allGlossary.filter((g) => chunkText.includes(g.source));
   const tm = await store.loadTm(workId, target, level);
   const text = await store.loadText(chapter.sourceHash);
   const chunks = chunkNovel(normalizeText(text), MAX_CHUNK);
@@ -293,7 +315,7 @@ export async function translateChapter(store, {
   let provider = pinned ? `${pinned.provider}/${pinned.model}` : null;
   // Translate several chunks at once: the free provider pool spreads them across
   // different free tiers, which is what makes a whole chapter feasible for free.
-  const CONC = Math.max(1, Math.min(Number(process.env.TRANSLATE_CONCURRENCY || 3), todo.length));
+  const CONC = Math.max(1, Math.min(Number(process.env.TRANSLATE_CONCURRENCY || 5), todo.length));
   let nextChunk = 0;
   let failure = null;
   let doneCount = 0;
@@ -400,17 +422,24 @@ export async function translateWholeStory(store, { workId, target, difficulties 
 export async function listWorks(store, { q = "", limit = 200 } = {}) {
   const db = await store.load();
   const needle = q.trim().toLowerCase();
+  const translations = Object.values(db.translations);
   return Object.values(db.works)
     .filter((w) => !needle || w.title.toLowerCase().includes(needle) || w.author.toLowerCase().includes(needle) || w.lang.includes(needle))
     .sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt))
     .slice(0, limit)
-    .map((w) => ({
-      ...w,
-      chapterCount: w.chapters.length,
-      volumeCount: (w.volumes || []).filter((v) => v.label && w.chapters.some((c) => (c.volumeKey || "") === v.key)).length,
-      translatedCount: Object.values(db.translations).filter((t) => t.workId === w.id).length,
-      warnings: Object.values(db.translations).filter((t) => t.workId === w.id && t.qa && !t.qa.ok).length,
-    }));
+    .map((w) => {
+      const trs = translations.filter((t) => t.workId === w.id);
+      // Summary only: a full work object can be hundreds of KB.
+      return {
+        id: w.id, title: w.title, author: w.author, lang: w.lang, sourceUrl: w.sourceUrl || "",
+        createdAt: w.createdAt, updatedAt: w.updatedAt,
+        languages: w.languages || [], settings: w.settings || {},
+        chapterCount: w.chapters.length,
+        volumeCount: (w.volumes || []).filter((v) => v.label && w.chapters.some((c) => (c.volumeKey || "") === v.key)).length,
+        translatedCount: trs.length,
+        warnings: trs.filter((t) => t.qa && !t.qa.ok).length,
+      };
+    });
 }
 
 export async function getWork(store, workId) {
@@ -435,7 +464,14 @@ export async function getWork(store, workId) {
     .map((v) => ({ ...v, chapterCount: chapters.filter((c) => (c.volumeKey || "") === v.key).length }))
     .filter((v) => v.chapterCount > 0);
   return {
-    ...work, chapters, volumes, terms,
+    id: work.id, title: work.title, author: work.author, lang: work.lang, sourceUrl: work.sourceUrl || "",
+    createdAt: work.createdAt, updatedAt: work.updatedAt,
+    languages: work.languages || [], settings: work.settings || {}, models: work.models || {},
+    usage: work.usage || { calls: 0, chunks: 0, byModel: {} }, tmSegments: work.tmSegments || {},
+    chapters, volumes,
+    // NOTE: the term table is deliberately NOT embedded (it can be ~340 KB);
+    // clients use GET /api/works/:id/terms?lang=xx instead.
+    termCount: Object.keys(terms).length,
     translatedCount: chapters.reduce((n, c) => n + c.translations.length, 0),
     volumeCount: volumes.filter((v) => v.label).length,
   };

@@ -105,11 +105,24 @@ export async function extractTermsWithModel(sourceSample, { source = "auto", tar
 /** Merge model/user pairs into a terms object for `lang`. Returns how many were added. */
 export function mergeTerms(terms, lang, pairs) {
   let added = 0;
+  // Case-insensitive lookup so "Magic" and "magic" can't become two JSON keys
+  // (case-duplicate keys break strict JSON parsers).
+  const byLower = new Map(Object.keys(terms).map((k) => [k.toLowerCase(), k]));
   for (const pair of pairs || []) {
     const source = pair?.source;
     const translation = pair?.translation ?? pair?.target;
     if (!source || !translation) continue;
+    const existingKey = byLower.get(String(source).toLowerCase());
+    if (existingKey && existingKey !== source) {
+      const t = terms[existingKey];
+      if (t && t.langs?.[lang]?.canonical) {
+        const slot = t.langs[lang];
+        if (slot.canonical !== translation && !slot.variants.includes(translation)) slot.variants.push(translation);
+      }
+      continue;
+    }
     const term = terms[source] || (terms[source] = { source, origin: "auto", at: Date.now(), langs: {} });
+    byLower.set(String(source).toLowerCase(), source);
     const { canonical, auto } = canonicalFor(source);
     const slot = term.langs[lang] || (term.langs[lang] = { canonical: null, variants: [], origin: "auto", at: Date.now() });
     if (!slot.canonical) {

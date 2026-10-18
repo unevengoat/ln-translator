@@ -12,7 +12,7 @@ import { parseBuffer } from "./files.js";
 import {
   ingestText, bulkIngest, workIdFor, listWorks, getWork, getChapter, translateChapter,
   correctTerm, suggestTerms, stats, searchLibrary, activityFeed, updateWork, deleteChapter, deleteWork,
-  restoreVersion, importGlossary, exportGlossary, cleanTerms, splitChapters, sortChapters,
+  restoreVersion, importGlossary, exportGlossary, cleanTerms, deleteTerm, splitChapters, sortChapters,
   DIFFICULTIES, DEFAULT_DIFFICULTY, cleanTranslationArtifacts,
 } from "./library.js";
 import { normalizeDifficulty } from "./qa.js";
@@ -35,11 +35,29 @@ const store = globalStore();
  * we return a job id immediately and the client polls /api/jobs/:id. */
 const jobs = new Map();
 let jobSeq = 0;
+const JOB_TYPES = new Set(["translate", "ingest", "chapter"]);
+
+async function persistJob(job) {
+  try {
+    await store.update((db) => {
+      db.jobs = db.jobs || {};
+      db.jobs[job.id] = {
+        id: job.id, type: job.type, state: job.state, done: job.done, total: job.total,
+        current: job.current || "", error: job.error || null, errors: (job.errors || []).slice(-5),
+        workId: job.workId || null, targets: job.targets || [], difficulties: job.difficulties || [],
+        startedAt: job.startedAt, finishedAt: job.finishedAt || null,
+      };
+      const ids = Object.keys(db.jobs);
+      if (ids.length > 40) for (const id of ids.slice(0, ids.length - 40)) delete db.jobs[id];
+    });
+  } catch { /* a lost job record must never break translation */ }
+}
 function startJob(type, meta = {}) {
   const id = `job_${(++jobSeq).toString(36)}${Date.now().toString(36)}`;
   const job = { id, type, state: "running", done: 0, total: 0, error: null, startedAt: Date.now(), ...meta };
   jobs.set(id, job);
   if (jobs.size > 60) jobs.delete(jobs.keys().next().value);
+  persistJob(job);
   return job;
 }
 function runJob(job, fn) {
@@ -47,8 +65,21 @@ function runJob(job, fn) {
     .then(fn)
     .then((result) => { job.state = "done"; job.result = result; })
     .catch((e) => { job.state = "error"; job.error = e.message; })
-    .finally(() => { job.finishedAt = Date.now(); });
+    .finally(() => { job.finishedAt = Date.now(); persistJob(job); });
   return job;
+}
+/** Jobs live in memory; after a restart, mark the leftovers as interrupted. */
+async function markInterruptedJobs() {
+  await store.update((db) => {
+    db.jobs = db.jobs || {};
+    for (const job of Object.values(db.jobs)) {
+      if (job.state === "running") {
+        job.state = "interrupted";
+        job.error = "The server restarted while this was running. Press translate again — finished chunks are kept.";
+        job.finishedAt = Date.now();
+      }
+    }
+  }).catch(() => {});
 }
 
 /** Translate every chapter of a story into each target × reading level, as a job. */
@@ -195,8 +226,12 @@ const server = createServer(async (req, res) => {
     }
     if (method === "GET" && pathname === "/api/jobs") return json(res, 200, [...jobs.values()].slice(-20).reverse());
     if (method === "GET" && /^\/api\/jobs\/[A-Za-z0-9_]+$/.test(pathname)) {
-      const job = jobs.get(pathname.split("/").pop());
-      return job ? json(res, 200, job) : json(res, 404, { error: "Unknown job" });
+      const id = pathname.split("/").pop();
+      const live = jobs.get(id);
+      if (live) return json(res, 200, live);
+      const db = await store.load();
+      const saved = db.jobs?.[id];
+      return saved ? json(res, 200, saved) : json(res, 404, { error: "Unknown job (the server may have restarted — press translate again; finished chunks are kept)" });
     }
     if (method === "GET" && pathname === "/api/languages") return json(res, 200, LANGUAGES);
     if (method === "GET" && pathname === "/api/providers") return json(res, 200, publicProviders());
@@ -375,6 +410,9 @@ const server = createServer(async (req, res) => {
       if (seg[3] === "terms" && seg.length === 5 && seg[4] === "clean" && method === "POST") {
         return json(res, 200, await cleanTerms(store, { workId }));
       }
+      if (seg[3] === "terms" && seg.length === 5 && method === "DELETE") {
+        return json(res, 200, await deleteTerm(store, { workId, source: decodeURIComponent(seg[4]) }));
+      }
       if (seg[3] === "glossary" && seg.length === 4 && method === "GET") {
         const lang = normalizeCode(q.lang || "en");
         const body = await exportGlossary(store, { workId, lang, format: q.format || "csv" });
@@ -401,8 +439,11 @@ const server = createServer(async (req, res) => {
           const job = startJob("chapter", { workId, chapterId, targets: [target], difficulties: [level] });
           job.total = 1;
           runJob(job, async () => {
-            const r = await translateChapter(store, { workId, chapterId, target, difficulty: level, force: !!b.force });
-            job.done = 1;
+            const r = await translateChapter(store, {
+              workId, chapterId, target, difficulty: level, force: !!b.force,
+              onProgress: ({ done, total }) => { job.done = done; job.total = total; job.current = `${target} (${level}) chunk ${done}/${total}`; },
+            });
+            job.done = job.total || 1;
             job.current = `${target} (${level})`;
             return { cached: r.cached, chunks: r.chunks, provider: r.provider, qa: r.qa, difficulty: r.difficulty };
           });
@@ -433,6 +474,9 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 server.listen(PORT, () => {
   console.log(`LN Translator: http://localhost:${PORT}`);
   console.log(`Storage: ${store.describe()}`);
+  // A job still marked "running" from a previous process is dead — report it
+  // instead of leaving the UI polling forever.
+  markInterruptedJobs().catch(() => {});
   const models = [process.env.GROQ_API_KEY && `groq/${PRIMARY.model} (primary)`, process.env.GEMINI_API_KEY && `gemini/${BACKUP.model} (extreme backup)`].filter(Boolean);
-  console.log(`Models: ${models.length ? models.join(", ") : "none configured — set GROQ_API_KEY"}`);
+  console.log(`Models: ${models.length ? models.join(", ") : "none configured - set GROQ_API_KEY"}`);
 });

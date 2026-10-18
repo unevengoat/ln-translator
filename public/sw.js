@@ -1,6 +1,6 @@
 // Service worker: offline-capable, but NETWORK-FIRST so app updates always
 // arrive. (Cache-first would hide new deploys behind a stale app.js.)
-const CACHE = "ln-shell-v2";
+const CACHE = "ln-shell-v3";
 const ASSETS = ["/", "/index.html", "/app.js", "/styles.css", "/manifest.webmanifest"];
 
 self.addEventListener("install", (e) => {

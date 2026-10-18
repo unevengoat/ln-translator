@@ -9,9 +9,10 @@ import { sleep, isTransient, retryAfterMs } from "./limits.js";
 
 // Per-provider pacing. Concurrency > 1 only where a provider tolerates it.
 const LIMITS = {
-  pollinations: { minGapMs: 900, maxConcurrent: 2, cooldownMs: 15000 },
-  groq: { minGapMs: 1300, maxConcurrent: 1, cooldownMs: 30000 },
-  gemini: { minGapMs: 1500, maxConcurrent: 1, cooldownMs: 30000 },
+  pollinations: { minGapMs: 700, maxConcurrent: 3, cooldownMs: 12000 },
+  "groq-fast": { minGapMs: 900, maxConcurrent: 1, cooldownMs: 20000 },
+  groq: { minGapMs: 1200, maxConcurrent: 1, cooldownMs: 25000 },
+  gemini: { minGapMs: 1500, maxConcurrent: 1, cooldownMs: 25000 },
   openrouter: { minGapMs: 1500, maxConcurrent: 1, cooldownMs: 30000 },
   mistral: { minGapMs: 1500, maxConcurrent: 1, cooldownMs: 30000 },
   cerebras: { minGapMs: 1500, maxConcurrent: 1, cooldownMs: 30000 },
@@ -93,7 +94,7 @@ export async function translatePooled(chunk, opts = {}, { maxWaitMs } = {}) {
   const attempts = [];
   const excluded = new Set();
   const allow = Array.isArray(opts.providers) && opts.providers.length ? opts.providers : null;
-  const budget = maxWaitMs ?? envNum("POOL_DEADLINE_MS", 300000);
+  const budget = maxWaitMs ?? envNum("POOL_DEADLINE_MS", 90000);
   const deadline = Date.now() + budget;
 
   while (Date.now() < deadline) {

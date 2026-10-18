@@ -7,7 +7,7 @@
 <meta name="description" content="A shared light novel / web novel library with per-profile reading, reading levels and instant translations.">
 <link rel="manifest" href="/manifest.webmanifest">
 <meta name="theme-color" content="#0b0b0d">
-<link rel="stylesheet" href="/styles.css">
+<link rel="stylesheet" href="/styles.css?v=3">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23e50914'/><text x='16' y='24' font-size='19' text-anchor='middle' fill='white'>N</text></svg>">
 </head>
 <body>
@@ -40,7 +40,8 @@
       <a href="#/about" data-nav="about">About</a>
     </nav>
     <span class="spacer"></span>
-    <button id="whoami" class="avatar-btn" title="Switch profile">🦊</button>
+    <button id="switchProfileBtn" class="ghost" title="Switch profile">Switch profile</button>
+    <button id="whoami" class="avatar-btn" title="Profile menu">🦊</button>
   </header>
 
   <div id="profileMenu" class="menu hidden">
@@ -260,6 +261,6 @@
 </div>
 
 <div class="toasts" id="toasts"></div>
-<script src="/app.js"></script>
+<script src="/app.js?v=3"></script>
 </body>
 </html>

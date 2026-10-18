@@ -200,6 +200,7 @@ async function manageProfiles() {
 }
 
 $("whoami").onclick = () => $("profileMenu").classList.toggle("hidden");
+$("switchProfileBtn").onclick = () => showGate();
 document.addEventListener("click", (e) => {
   if (!e.target.closest("#profileMenu") && !e.target.closest("#whoami")) $("profileMenu").classList.add("hidden");
 });
@@ -558,19 +559,27 @@ async function followJob(jobId, { reload, label = "Working", target } = {}) {
   const out = target || $("readerMeta");
   let last = "";
   for (let i = 0; i < 3000; i++) {
-    const job = await API(`/api/jobs/${jobId}`).catch(() => null);
-    if (!job) break;
+    let job;
+    try { job = await API(`/api/jobs/${jobId}`); }
+    catch (e) {
+      out.innerHTML = `Job lost (server restarted). <button id="jobRetry" class="ghost" type="button">Retry</button>`;
+      $("jobRetry")?.addEventListener("click", () => $("translateBtn").click());
+      throw new Error("The server restarted during this job — finished chunks are kept, press translate to resume.");
+    }
     if (job.state === "running") {
       const line = `${esc(label)}… ${job.done}/${job.total}${job.current ? ` — ${esc(job.current)}` : ""}`;
       if (line !== last) { out.innerHTML = line; last = line; }
     }
+    if (job.state === "interrupted") {
+      throw new Error(job.error || "Interrupted by a restart — press translate to resume.");
+    }
     if (job.state === "done" || job.state === "error") {
       await reload?.();
       if (job.state === "error") throw new Error(job.error || "job failed");
-      if (job.errors?.length) toast(`${job.errors.length} chunk group(s) hit rate limits — retry to continue`, "warn");
+      if (job.errors?.length) toast(`${job.errors.length} rate-limit hits — retry to continue`, "warn");
       return job;
     }
-    await new Promise((r) => setTimeout(r, 2500));
+    await new Promise((r) => setTimeout(r, 2000));
   }
   return null;
 }
@@ -602,10 +611,20 @@ function renderTerms() {
     ? list.slice(0, CAP).map((t) => `<div class="term" data-source="${esc(t.source)}" data-canonical="${esc(t.canonical)}">
         <span class="src">${esc(t.source)}</span> → <strong>${esc(t.canonical)}</strong>
         <span class="hint">(${esc(t.origin)}${t.variants?.length ? " · seen: " + t.variants.map(esc).join(", ") : ""})</span>
-        <button class="edit ghost" type="button">Edit</button></div>`).join("") + (list.length > CAP ? `<p class="hint">…${list.length - CAP} more</p>` : "")
+        <button class="edit ghost" type="button">Edit</button>
+        <button class="del ghost" type="button" title="Delete this term">✕</button></div>`).join("") + (list.length > CAP ? `<p class="hint">…${list.length - CAP} more</p>` : "")
     : `<p class="hint">${all.length ? "No match." : "No terms yet for this language."}</p>`;
   document.querySelectorAll(".term .edit").forEach((b) => (b.onclick = () => {
     const t = b.closest(".term"); $("termSource").value = t.dataset.source; $("termCanonical").value = t.dataset.canonical;
+  }));
+  document.querySelectorAll(".term .del").forEach((b) => (b.onclick = async () => {
+    const t = b.closest(".term");
+    if (!confirm(`Delete term “${t.dataset.source}”?`)) return;
+    try {
+      await del(`/api/works/${currentWork.id}/terms/${encodeURIComponent(t.dataset.source)}`);
+      toast("Term deleted", "ok");
+      await loadTerms(); await loadChapter();
+    } catch (e) { toast(e.message, "error"); }
   }));
 }
 $("termSearch").oninput = renderTerms;
@@ -792,8 +811,16 @@ function applyLook() {
 }
 function registerPWA() { if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {}); }
 
-/* resume a saved session automatically */
+/* resume: show the profile gate every visit (Netflix-style), remembering who was
+   here last, but never auto-enter a profile with a PIN. */
 (async () => {
   try { await boot(); } catch (e) { toast("Startup error: " + e.message, "error"); }
-  if (TOKEN) { try { const r = await API("/api/me"); if (r.profile) await enterApp(r.profile); } catch { TOKEN = null; LS.del("token"); } }
+  if (TOKEN) {
+    try {
+      const r = await API("/api/me");
+      if (r.profile) {
+        $("gateMsg").textContent = `Last used: ${r.profile.avatar} ${r.profile.name} — tap a profile to continue.`;
+      }
+    } catch { TOKEN = null; LS.del("token"); }
+  }
 })();
