@@ -12,7 +12,7 @@ import { parseBuffer } from "./files.js";
 import {
   ingestText, bulkIngest, workIdFor, listWorks, getWork, getChapter, translateChapter,
   correctTerm, suggestTerms, stats, searchLibrary, activityFeed, updateWork, deleteChapter, deleteWork,
-  restoreVersion, importGlossary, exportGlossary, cleanTerms, deleteTerm, splitChapters, sortChapters,
+  restoreVersion, importGlossary, exportGlossary, cleanTerms, deleteTerm, refreshTerms, splitChapters, sortChapters,
   DIFFICULTIES, DEFAULT_DIFFICULTY, cleanTranslationArtifacts,
 } from "./library.js";
 import { normalizeDifficulty } from "./qa.js";
@@ -409,6 +409,10 @@ const server = createServer(async (req, res) => {
       }
       if (seg[3] === "terms" && seg.length === 5 && seg[4] === "clean" && method === "POST") {
         return json(res, 200, await cleanTerms(store, { workId }));
+      }
+      if (seg[3] === "terms" && seg.length === 5 && seg[4] === "refresh" && method === "POST") {
+        const b = await readJson(req);
+        return json(res, 200, await refreshTerms(store, { workId, lang: normalizeCode(b.lang || "en") }));
       }
       if (seg[3] === "terms" && seg.length === 5 && method === "DELETE") {
         return json(res, 200, await deleteTerm(store, { workId, source: decodeURIComponent(seg[4]) }));

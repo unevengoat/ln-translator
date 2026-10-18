@@ -151,6 +151,24 @@ export async function ensureTermsForLang(store, workId, lang, { fetchFn = fetch 
   return added;
 }
 
+/** Force a fresh term discovery for one language (re-samples several chapters). */
+export async function refreshTerms(store, { workId, lang }) {
+  if (!workId || !lang) throw new Error("workId and lang are required.");
+  await store.update((d) => {
+    const w = d.works[workId];
+    if (w) {
+      const done = { ...(w.termExtracted || {}) };
+      delete done[lang];
+      w.termExtracted = done;
+    }
+  });
+  await store.flush();
+  const added = await ensureTermsForLang(store, workId, lang);
+  const terms = await store.loadTerms(workId);
+  const mapped = Object.values(terms).filter((t) => t.langs?.[lang]?.canonical).length;
+  return { added, mapped, total: Object.keys(terms).length };
+}
+
 /** Delete a single term (a typo/junk entry) from a story's glossary. */
 export async function deleteTerm(store, { workId, source } = {}) {
   if (!workId || !source) throw new Error("workId and source are required.");

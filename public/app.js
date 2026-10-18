@@ -652,6 +652,15 @@ $("cleanTerms").onclick = async () => {
   const r = await post(`/api/works/${currentWork.id}/terms/clean`, {});
   toast(`Removed ${r.removed} (${r.before} → ${r.after})`, "ok"); await loadTerms(); await loadChapter();
 };
+$("refreshTerms").onclick = async () => {
+  busy($("refreshTerms"), true, "Reading several chapters…");
+  try {
+    const r = await post(`/api/works/${currentWork.id}/terms/refresh`, { lang: currentLang });
+    toast(`${r.mapped}/${r.total} terms now have a ${langName(currentLang)} form (+${r.added})`, "ok");
+    await loadTerms(); await loadChapter();
+  } catch (e) { toast(e.message, "error"); }
+  finally { busy($("refreshTerms"), false); }
+};
 $("exportGloss").onclick = () => window.open(`/api/works/${currentWork.id}/glossary?lang=${currentLang}&format=csv`, "_blank");
 $("importGlossFile").onchange = async () => {
   const f = $("importGlossFile").files[0]; if (!f) return;
