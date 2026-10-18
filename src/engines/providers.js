@@ -9,13 +9,13 @@ export const PROVIDERS = {
     models: ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"],
   },
   // Same account/key but a different model — Groq rate-limits per model, so this
-  // effectively doubles free throughput. Used for easy/medium levels and fallbacks.
+  // effectively doubles free throughput. (qwen3.8-27b benchmarked at ~0.5s/chunk.)
   "groq-fast": {
-    label: "Groq fast (8B — separate limits)",
+    label: "Groq fast (Qwen 27B — separate limits)",
     baseUrl: "https://api.groq.com/openai/v1",
     keyEnv: "GROQ_API_KEY",
     needsKey: true,
-    models: ["llama-3.1-8b-instant"],
+    models: ["qwen/qwen3.8-27b", "openai/gpt-oss-20b"],
   },
   cerebras: {
     label: "Cerebras (fast free tier)",

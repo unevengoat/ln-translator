@@ -60,6 +60,7 @@ export function poolStatus() {
 }
 
 function readyNow(s) {
+  if (s.disabled) return false;
   if (s.cooldownUntil > Date.now()) return false;
   if (s.inFlight >= s.maxConcurrent) return false;
   if (Date.now() - s.lastAt < s.minGapMs && s.inFlight > 0) return false;
@@ -131,9 +132,14 @@ export async function translatePooled(chunk, opts = {}, { maxWaitMs } = {}) {
         s.rateLimited++;
         if (/quota|exceeded your current/i.test(e.message)) s.cooldownUntil = Date.now() + Math.max(wait, 300000); // daily quota → long rest
       } else {
-        // model gone? try the next model on this provider next time
+        // Model retired? Walk this provider's model list, and after two misses
+        // stop using the provider for this session (it would just waste attempts).
         s.modelIndex++;
-        if (s.modelIndex >= (PROVIDERS[provider]?.models?.length || 1)) { s.modelIndex = 0; excluded.add(provider); }
+        if (s.modelIndex >= (PROVIDERS[provider]?.models?.length || 1)) {
+          s.modelIndex = 0;
+          s.modelMisses = (s.modelMisses || 0) + 1;
+          if (s.modelMisses >= 2) { s.disabled = true; excluded.add(provider); }
+        }
       }
       await sleep(120);
     }

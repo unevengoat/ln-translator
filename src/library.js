@@ -12,7 +12,7 @@ import {
 } from "./terms.js";
 import { lintTranslation, summarizeWarnings, cleanTranslationArtifacts, normalizeDifficulty, DEFAULT_DIFFICULTY, DIFFICULTIES } from "./qa.js";
 
-export const MAX_CHUNK = 1800;
+export const MAX_CHUNK = 2600;
 export const TERM_REF_LANG = "en"; // reference language for first-pass term discovery
 const ACTIVITY_CAP = 500;
 const DEFAULT_SETTINGS = { keepHonorifics: true, formality: "match", notes: "" };
