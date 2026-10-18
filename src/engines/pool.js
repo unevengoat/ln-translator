@@ -47,6 +47,8 @@ function apiKeyFor(provider) {
 export function configuredProviders() {
   return Object.keys(PROVIDERS)
     .filter((p) => p !== "custom")
+    // Ollama only exists if you explicitly point at it (it is not on the server).
+    .filter((p) => p !== "ollama" || !!process.env.OLLAMA_URL)
     .filter((p) => !PROVIDERS[p].needsKey || !!apiKeyFor(p))
     .map((p) => ({ provider: p, model: PROVIDERS[p].models?.[0] || "", keyless: !PROVIDERS[p].needsKey }));
 }

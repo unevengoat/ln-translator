@@ -60,6 +60,15 @@ export const PROVIDERS = {
     needsKey: false,
     models: ["openai"],
   },
+  // Local Ollama: free and fast with no rate limits, but only reachable when you
+  // run the app on your own machine. Enable with OLLAMA_URL (e.g. http://localhost:11434/v1).
+  ollama: {
+    label: "Ollama (local, free, no rate limits)",
+    baseUrl: process.env.OLLAMA_URL || "http://localhost:11434/v1",
+    keyEnv: "OLLAMA_API_KEY",
+    needsKey: false,
+    models: ["qwen2.5:7b-instruct", "llama3.1:8b", "mistral:7b"],
+  },
   custom: {
     label: "Custom OpenAI-compatible (Ollama / LM Studio / OpenAI)",
     baseUrl: "https://api.openai.com/v1",

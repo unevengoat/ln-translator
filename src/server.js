@@ -441,15 +441,28 @@ const server = createServer(async (req, res) => {
           const target = normalizeCode(b.target);
           const level = normalizeDifficulty(b.difficulty);
           const job = startJob("chapter", { workId, chapterId, targets: [target], difficulties: [level] });
-          job.total = 1;
+          job.total = 0;
+          // While every free tier is cooling down, say so — otherwise the UI
+          // looks frozen even though it is just waiting out a rate limit.
+          const waitingTimer = setInterval(() => {
+            try {
+              const cooling = poolStatus().filter((p) => p.coolingDown);
+              if (cooling.length && job.state === "running") {
+                const worst = Math.max(...cooling.map((p) => p.cooldownMs));
+                job.current = `${target} (${level}) — free tiers rate-limited, waiting ${Math.ceil(worst / 1000)}s`;
+              }
+            } catch { /* ignore */ }
+          }, 4000);
           runJob(job, async () => {
-            const r = await translateChapter(store, {
-              workId, chapterId, target, difficulty: level, force: !!b.force,
-              onProgress: ({ done, total }) => { job.done = done; job.total = total; job.current = `${target} (${level}) chunk ${done}/${total}`; },
-            });
-            job.done = job.total || 1;
-            job.current = `${target} (${level})`;
-            return { cached: r.cached, chunks: r.chunks, provider: r.provider, qa: r.qa, difficulty: r.difficulty };
+            try {
+              const r = await translateChapter(store, {
+                workId, chapterId, target, difficulty: level, force: !!b.force,
+                onProgress: ({ done, total }) => { job.done = done; job.total = total; job.current = `${target} (${level}) chunk ${done}/${total}`; },
+              });
+              job.done = job.total || 1;
+              job.current = `${target} (${level})`;
+              return { cached: r.cached, chunks: r.chunks, provider: r.provider, qa: r.qa, difficulty: r.difficulty };
+            } finally { clearInterval(waitingTimer); }
           });
           return json(res, 202, { jobId: job.id, workId, chapterId, target, difficulty: level });
         }
