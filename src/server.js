@@ -13,7 +13,7 @@ import {
   ingestText, bulkIngest, workIdFor, listWorks, getWork, getChapter, translateChapter,
   correctTerm, suggestTerms, stats, searchLibrary, activityFeed, updateWork, deleteChapter, deleteWork,
   restoreVersion, importGlossary, exportGlossary, cleanTerms, deleteTerm, refreshTerms, splitChapters, sortChapters,
-  DIFFICULTIES, DEFAULT_DIFFICULTY, cleanTranslationArtifacts,
+  DIFFICULTIES, DEFAULT_DIFFICULTY, cleanTranslationArtifacts, cleanExistingFrontMatter,
 } from "./library.js";
 import { normalizeDifficulty } from "./qa.js";
 import {
@@ -491,6 +491,11 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 server.listen(PORT, () => {
   console.log(`LN Translator: http://localhost:${PORT}`);
   console.log(`Storage: ${store.describe()}`);
+  // Run the existing-library front-matter cleanup on every startup; it only
+  // changes chapter blobs with an explicit prologue after leading material.
+  cleanExistingFrontMatter(store).then((count) => {
+    if (count) console.log(`Removed pre-prologue text from ${count} existing chapter(s)`);
+  }).catch((e) => console.error("Existing-library cleanup failed:", e.message));
   // A job still marked "running" from a previous process is dead — report it
   // instead of leaving the UI polling forever.
   markInterruptedJobs().catch(() => {});

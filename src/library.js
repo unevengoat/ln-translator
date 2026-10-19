@@ -45,10 +45,161 @@ const newWork = (id, { title, author, sourceLang, sourceUrl }) => ({
 /* ------------------------------------------------------- chapters / splitting */
 
 // Note: no \b — it never matches after a CJK character (話 is not a "word" char).
-const CHAPTER_MARKER = /^\s*(?:第\s*\d+\s*[章話话節节回]|chapter\s+\d+|ch\.?\s*\d+)(?:[\s:：.。\-—]|$)/i;
+const CHAPTER_MARKER = /^\s*(?:第\s*\d+\s*[章話话節节回]|(?:chapter|kapitel)\s*\d+|ch\.?\s*\d+|prolog(?:ue)?|slutkapitel)(?=$|[\s:：.。\-—]|[\p{Lu}])/iu;
 // A volume marker must be a short standalone line — otherwise prose like
 // "Volume 5 completely stagnated..." would be mistaken for a volume heading.
 const VOLUME_MARKER = /^\s*(?:(?:volume|vol\.?|book)\s*\d+|第\s*\d+\s*[巻卷]|\d+\s*巻)\s*[:：.\-—]?\s*\S{0,25}\s*$/i;
+const TABLE_OF_CONTENTS = /^\s*(?:contents|table of contents|innehåll|innehall|目次)\s*$/i;
+const TOC_END_CUE = /keep up with|håll dig uppdaterad|download|ladda ner|subscribe|visit us|jnovels\.com/i;
+const BACK_MATTER = /^\s*(?:appendix|appendices|afterword|acknowledg(?:e)?ments?|colophon|glossary|index|yen newsletter)\b/i;
+const EXTRANEOUS_LINE = /copyright|all rights reserved|this book is a work of fiction|fictional work|immateriell(?:a)? egendom|förlaget ansvarar inte|library of congress|cataloging-in-publication|lccn|isbn|first (?:yen|edition)|först publicerad|första utgåvan|publicerad i japan|rights to .*translation|translation by|översättning av|cover art|cover illustration|omslagsillustration|illustration by|yen press|yen on|tuttle-mori|facebook\.com|twitter\.com|instagram\.com|tumblr\.com|https?:\/\/|\b(?:lcc|ddc)\s+[a-z0-9]/i;
+
+function splitAttachedHeadings(text) {
+  const lines = normalizeText(text).split("\n");
+  const output = [];
+  const tocEntry = /(?:Chapter|Kapitel)\s*\d+|Slutkapitel|第\s*\d+\s*[章話话節节回]/gu;
+  for (const line of lines) {
+    // In OCR'd TOCs multiple chapter entries are often glued into one line.
+    const entries = [...line.matchAll(tocEntry)];
+    if (entries.length > 1) {
+      for (let i = 0; i < entries.length; i++) {
+        const start = entries[i].index;
+        const end = entries[i + 1]?.index ?? line.length;
+        if (i === 0 && start > 0) output.push(line.slice(0, start).trim());
+        output.push(line.slice(start, end).trim());
+      }
+    } else {
+      output.push(line.replace(/^(Prolog(?:ue)?)(?=[\p{Lu}])/u, "$1\n"));
+    }
+  }
+  return output.join("\n");
+}
+
+/** Remove publisher matter, contents listings, and back matter before splitting. */
+function storyTextOnly(text) {
+  let lines = splitAttachedHeadings(text).split("\n");
+  const tocStart = lines.findIndex((line) => TABLE_OF_CONTENTS.test(line));
+  if (tocStart >= 0) {
+    const tocEnd = lines.findIndex((line, i) => i > tocStart && TOC_END_CUE.test(line));
+    if (tocEnd >= 0) {
+      // Contents pages often list chapter headings as if they were real chapters.
+      // Resume at the first heading after the publisher's promo/footer.
+      const storyAfterPromo = lines.findIndex((line, i) => i > tocEnd && CHAPTER_MARKER.test(line));
+      lines = storyAfterPromo >= 0 ? lines.slice(storyAfterPromo) : [];
+    } else {
+      // Without a clear footer, do not guess which listed heading is the real story.
+      return "";
+    }
+  }
+
+  const firstStory = lines.findIndex((line) => CHAPTER_MARKER.test(line));
+  if (firstStory >= 0) {
+    // Keep a volume heading immediately before the first chapter marker.
+    let start = firstStory;
+    for (let i = firstStory - 1; i >= 0; i--) {
+      if (VOLUME_MARKER.test(lines[i])) { start = i; break; }
+      if (lines[i].trim()) break;
+    }
+    lines = lines.slice(start);
+  } else if (tocStart >= 0) return "";
+
+  const kept = [];
+  for (const line of lines) {
+    if (BACK_MATTER.test(line) || TOC_END_CUE.test(line)) break;
+    if (!EXTRANEOUS_LINE.test(line)) kept.push(line);
+  }
+  return kept.join("\n").trim();
+}
+
+const PROLOGUE_MARKER = /^\s*prolog(?:ue)?(?=$|[\s:：.。\-—]|[\p{Lu}])/iu;
+
+/** Locate an explicit prologue, preferring the one after a contents-page footer. */
+function prologueStartIndex(text) {
+  const lines = splitAttachedHeadings(text).split("\n");
+  const prologues = lines.flatMap((line, index) => PROLOGUE_MARKER.test(line) ? [index] : []);
+  if (!prologues.length) return -1;
+  const contentsIndex = lines.findIndex((line) => TABLE_OF_CONTENTS.test(line));
+  if (contentsIndex < 0) return prologues[0];
+  const promoIndex = lines.findIndex((line, i) => i > contentsIndex && TOC_END_CUE.test(line));
+  if (promoIndex >= 0) return prologues.find((index) => index > promoIndex) ?? -1;
+  // Contents-only files have no actual story section to retain.
+  return -1;
+}
+
+/** Return null unless an explicit prologue proves there is leading matter to remove. */
+function removeBeforePrologue(text) {
+  const original = String(text ?? "");
+  const lines = splitAttachedHeadings(original).split("\n");
+  const start = prologueStartIndex(original);
+  if (start <= 0) return null;
+  return lines.slice(start).join("\n").trim();
+}
+
+/** Remove publisher/TOC text and leading front-matter chapters from stored stories. */
+export async function cleanExistingFrontMatter(store) {
+  const db = await store.load();
+  const plans = [];
+  const removedChapters = new Map();
+  for (const work of Object.values(db.works || {})) {
+    const chapters = sortChapters(work);
+    let firstPrologue = -1;
+    for (let i = 0; i < chapters.length; i++) {
+      const chapter = chapters[i];
+      const source = await store.loadText(chapter.sourceHash).catch(() => "");
+      if (PROLOGUE_MARKER.test(chapter.title || "") || prologueStartIndex(source) >= 0) {
+        firstPrologue = i;
+        break;
+      }
+    }
+    if (firstPrologue > 0) removedChapters.set(work.id, new Set(chapters.slice(0, firstPrologue).map((chapter) => chapter.id)));
+
+    for (const chapter of chapters) {
+      const hashes = new Set([chapter.sourceHash, ...(chapter.versions || []).map((version) => version.hash)].filter(Boolean));
+      const replacements = new Map();
+      for (const hash of hashes) {
+        const original = await store.loadText(hash).catch(() => null);
+        if (original == null) continue;
+        const cleaned = removeBeforePrologue(original);
+        if (cleaned == null || cleaned === original) continue;
+        replacements.set(hash, await store.saveText(cleaned));
+      }
+      if (replacements.size) plans.push({ workId: work.id, chapterId: chapter.id, replacements });
+    }
+  }
+  if (!plans.length && !removedChapters.size) return 0;
+
+  await store.update((current) => {
+    for (const [workId, ids] of removedChapters) {
+      const work = current.works[workId];
+      if (!work) continue;
+      work.chapters = work.chapters.filter((chapter) => !ids.has(chapter.id));
+      for (const key of Object.keys(current.translations || {})) {
+        if (ids.has(current.translations[key].chapterId)) delete current.translations[key];
+      }
+      work.updatedAt = Date.now();
+    }
+    for (const plan of plans) {
+      const work = current.works[plan.workId];
+      const chapter = work?.chapters?.find((item) => item.id === plan.chapterId);
+      if (!chapter) continue;
+      const activeReplacement = plan.replacements.get(chapter.sourceHash);
+      chapter.sourceHash = activeReplacement || chapter.sourceHash;
+      if (activeReplacement) chapter.bodyHash = activeReplacement;
+      chapter.versions = (chapter.versions || []).map((version) => ({
+        ...version, hash: plan.replacements.get(version.hash) || version.hash,
+      }));
+      if (activeReplacement) {
+        for (const key of Object.keys(current.translations || {})) {
+          if (current.translations[key].chapterId === chapter.id) delete current.translations[key];
+        }
+        chapter.updatedAt = Date.now();
+        work.updatedAt = chapter.updatedAt;
+      }
+    }
+  });
+  await store.flush();
+  return plans.length + [...removedChapters.values()].reduce((count, ids) => count + ids.size, 0);
+}
 
 export const volumeLabel = (v) => String(v ?? "").trim();
 export const volumeKeyOf = (label) => volumeLabel(label).replace(/\s+/g, " ").toLowerCase();
@@ -80,7 +231,7 @@ export function sortChapters(work) {
  * (English + CJK): "Volume 1", "Vol. 2", "第1巻", "第1話", "Chapter 3".
  */
 export function splitChapters(text, { defaultVolume = "" } = {}) {
-  const norm = normalizeText(text);
+  const norm = storyTextOnly(text);
   if (!norm) return [];
   const parts = [];
   let volume = volumeLabel(defaultVolume);

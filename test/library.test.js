@@ -15,7 +15,7 @@ import { Store, LocalBackend } from "../src/store.js";
 import {
   ingestText, bulkIngest, splitChapters, translateChapter, translateWholeStory, correctTerm,
   listWorks, getWork, getChapter, stats, searchLibrary, activityFeed, updateWork,
-  deleteChapter, deleteWork, restoreVersion, suggestTerms, importGlossary, exportGlossary, parseTermInput,
+  deleteChapter, deleteWork, restoreVersion, suggestTerms, importGlossary, exportGlossary, parseTermInput, cleanExistingFrontMatter,
 } from "../src/library.js";
 import { mergeTerms, termsGlossary, canonicalFor, extractCandidates, termsToCsv, termCounts, latinCandidates, cleanNoisyTerms } from "../src/terms.js";
 import { lintTranslation, summarizeWarnings, normalizeDifficulty, cleanTranslationArtifacts, DIFFICULTIES } from "../src/qa.js";
@@ -49,6 +49,67 @@ describe("chapter splitting (bulk upload)", () => {
   });
   it("returns one chapter when there are no markers", () => {
     assert.equal(splitChapters("Just a wall of text with no markers.").length, 1);
+  });
+  it("excludes publisher matter and a concatenated contents page before splitting", () => {
+    const text = `Copyright\nThe Eminence in Shadow 01 DAISUKE AIZAWA\nÖversättning av Kristi Fernandez Omslagsillustration av Touzai\nDenna bok är ett skönlitterärt verk.\nKAGE NO JITSURYOKUSHA vol. 1 ©Daisuke Aizawa 2018\nYen Press, LLC\nLibrary of Congress Cataloging-in-Publication Data ISBN 9781975359058\nInnehåll\nPrologFörbereder Perfect Stage! Kapitel 1Startar Shadowbroker Tutorial! Kapitel 2Tar på sig rollen som en Side Character i skolan! Kapitel 3Mitt Official Beginning som en Mastermind i handling! Kapitel 4De Two Sides av Shadow Garden?! Kapitel 5Bemästra Peaceful Life av en Nobody! Kapitel 6Scenen där Terrorists Take Over the School Slutkapitel: Min idé om Ultimate Shadow Commander! Appendix Afterword Yen Newsletter\nHåll dig uppdaterad om Light Novels genom att ladda ner vår mobilapp\nZerobooks Android Zerobooks IOS Ladda ner alla dina Favorite Light Novels Jnovels.com\nProlog\nThis is the actual prologue.\nKapitel 1Startar Shadowbroker Tutorial!\nThis is the actual first chapter.\nAfterword\nPublisher notes.`;
+    const parts = splitChapters(text);
+    assert.equal(parts.length, 2);
+    assert.match(parts[0].title, /Prolog/);
+    assert.match(parts[0].text, /actual prologue/);
+    assert.match(parts[1].title, /Kapitel 1/);
+    assert.match(parts[1].text, /actual first chapter/);
+    const imported = parts.map((part) => `${part.title}\n${part.text}`).join("\n");
+    assert.doesNotMatch(imported, /Copyright|ISBN|Library of Congress|Översättning|Yen Press|Jnovels|Publisher notes|contents/i);
+    assert.equal((imported.match(/Shadowbroker Tutorial!/g) || []).length, 1, "the real chapter heading may share its TOC title, but must not create a duplicate chapter");
+  });
+  it("drops a contents-only file instead of importing it as a chapter", () => {
+    assert.deepEqual(splitChapters("Innehåll\nProlog\nKapitel 1\nAfterword"), []);
+  });
+  it("cleans pre-prologue text from already stored chapters and drops stale translations", async () => {
+    const work = await ingestText(store, {
+      title: "Existing front matter", sourceLang: "en", chapterTitle: "Chapter 1",
+      text: "Copyright\nISBN 12345\nProlog\nActual story starts here.",
+    });
+    const before = await getChapter(store, { workId: work.workId, chapterId: work.chapterId });
+    assert.match(before.original, /Copyright/);
+    await store.update((db) => {
+      db.translations[`${work.workId}|${work.chapterId}|sv|medium`] = {
+        key: `${work.workId}|${work.chapterId}|sv|medium`, workId: work.workId, chapterId: work.chapterId,
+        target: "sv", difficulty: "medium", hash: work.hash || before.chapter.sourceHash,
+      };
+    });
+    const count = await cleanExistingFrontMatter(store);
+    assert.equal(count, 1);
+    const after = await getChapter(store, { workId: work.workId, chapterId: work.chapterId });
+    assert.equal(after.original, "Prolog\nActual story starts here.");
+    assert.equal(after.available.length, 0, "translations of the changed source must not be displayed");
+    assert.equal(await cleanExistingFrontMatter(store), 0, "cleanup is idempotent");
+  });
+  it("removes earlier front-matter chapter records once a later prologue is identified", async () => {
+    const front = await ingestText(store, {
+      title: "Split front matter", sourceLang: "en", chapterTitle: "Title page",
+      text: "Copyright\nISBN 12345\nThe Eminence in Shadow.",
+    });
+    const prologue = await ingestText(store, {
+      title: "Split front matter", sourceLang: "en", chapterTitle: "Prolog",
+      text: "The story begins here.",
+    });
+    await store.update((db) => {
+      db.translations[`front|${front.chapterId}`] = { chapterId: front.chapterId, workId: front.workId, target: "sv", hash: "unused" };
+    });
+    const removed = await cleanExistingFrontMatter(store);
+    assert.equal(removed, 1);
+    const work = await getWork(store, front.workId);
+    assert.deepEqual(work.chapters.map((chapter) => chapter.id), [prologue.chapterId]);
+    assert.equal(Object.values((await store.load()).translations).some((translation) => translation.chapterId === front.chapterId), false);
+    assert.equal(await cleanExistingFrontMatter(store), 0, "cleanup is idempotent");
+  });
+  it("does not alter existing chapters without an explicit prologue", async () => {
+    const work = await ingestText(store, { title: "No prologue", sourceLang: "en", text: "An ordinary opening paragraph." });
+    const before = await getChapter(store, { workId: work.workId, chapterId: work.chapterId });
+    assert.equal(await cleanExistingFrontMatter(store), 0);
+    const after = await getChapter(store, { workId: work.workId, chapterId: work.chapterId });
+    assert.equal(after.original, before.original);
   });
 });
 
