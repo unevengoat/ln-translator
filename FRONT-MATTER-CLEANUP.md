@@ -18,7 +18,7 @@ The current uncommitted implementation touches:
 - `test/library.test.js`
   - Adds regression coverage for the Swedish/OCR example, existing stored front matter, earlier front-matter chapter removal, stale translation removal, idempotence, and stories without a prologue.
 
-At the time this handoff was first drafted, the implementation was only in the workspace. The user has since authorized pushing and deployment; record the resulting commit, Render deploy status, and live cleanup verification in the deployment section below.
+At the time this handoff was first drafted, the implementation was only in the workspace. The first cleanup release was pushed and deployed as `5c517ed`. It rewrote the stored prologue source, but left the old visible chapter title (`Front Matter`) unchanged. A follow-up fix to correct that label is now being verified; record its commit, deploy, and production result below.
 
 ## Verification already run
 
@@ -36,7 +36,8 @@ Dependencies were installed using the existing `package-lock.json`; the lockfile
 - The service is configured for auto-deploy on commit to `main`.
 - The public health endpoint reported the production library backend as the private GitHub repo `unevengoat/ln-translator-data` on branch `main`; the library contained one story and 58 chapters at the baseline check. Counts can change as users work.
 - Render is connected in Freebuff, and the integration can list services and initiate deployments. This handoff does not include secret values.
-- The user has authorized pushing and deploying this cleanup change now that the other coding session is finished. Record the exact resulting commit/deploy status and cleanup count here after verification.
+- Initial cleanup commit `5c517ed` is live on Render deploy `dep-dbaup63m8hqs73bqkdc0`. Runtime verification showed the stored first chapter's source now starts with `Prologue` and its actual story text, but its visible title remains `Front Matter`; a follow-up relabel fix is being prepared and must be pushed/deployed to finish that display correction.
+- Production before the cleanup migration had one work with 58 chapters. The verified first chapter's source was cleaned, but the public chapter count remained 58, so don't report the whole migration as complete until checking each chapter and the follow-up behavior.
 
 ## Secrets and API keys — important
 
@@ -47,12 +48,11 @@ Dependencies were installed using the existing `package-lock.json`; the lockfile
 
 ## Steps for the next session after the other work is complete
 
-1. Review `git status` and `git diff` with the other session's owner; preserve their work and resolve any overlap before committing or pushing.
-2. Run `npm test` and `git diff --check` again if the implementation changes.
-3. Push the verified commit to `main` only with user authorization. Render is configured to auto-deploy commits from `main`; check deploy history before manually triggering a second deploy.
-4. Confirm the target service id is still `srv-db9kd73rjlhs73f5gpu0` and verify the deployed commit includes these changes.
-5. After deployment, check `/api/health` and Render logs for the cleanup completion message. Verify live chapter/source contents through an authorized API or data backend, and record chapters removed, sources rewritten, and any stories left unchanged because no prologue was identifiable.
-6. Treat public health responses and Render env-var values as potentially sensitive; never copy secret values into notes or chat.
+1. Re-run `npm test` and `git diff --check`; current follow-up tests cover source cleanup and relabeling existing `Front Matter`/`Chapter N` titles.
+2. Stage only `src/library.js`, `test/library.test.js`, and this handoff; commit and push to `main` (authorized by the user). Render auto-deploys commits to `main`.
+3. Check Render deploy history for a live deployment of the new commit.
+4. Check startup logs for cleanup completion, then inspect the work and its first chapters through the public API. Verify the prologue text and chapter title, and compare chapter counts. Record the result here.
+5. Treat public health responses and Render env-var values as potentially sensitive; never copy secret values into notes or chat.
 
 ## Limitation / correctness caveat
 

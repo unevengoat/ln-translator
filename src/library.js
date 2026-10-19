@@ -140,14 +140,19 @@ export async function cleanExistingFrontMatter(store) {
   const db = await store.load();
   const plans = [];
   const removedChapters = new Map();
+  const chapterTitles = new Map();
   for (const work of Object.values(db.works || {})) {
     const chapters = sortChapters(work);
     let firstPrologue = -1;
     for (let i = 0; i < chapters.length; i++) {
       const chapter = chapters[i];
       const source = await store.loadText(chapter.sourceHash).catch(() => "");
-      if (PROLOGUE_MARKER.test(chapter.title || "") || prologueStartIndex(source) >= 0) {
+      const prologueIndex = prologueStartIndex(source);
+      if (PROLOGUE_MARKER.test(chapter.title || "") || prologueIndex >= 0) {
         firstPrologue = i;
+        if (/^(?:front matter|chapter\s+\d+)$/i.test(chapter.title || "") && prologueIndex >= 0) {
+          chapterTitles.set(`${work.id}|${chapter.id}`, splitAttachedHeadings(source).split("\n")[prologueIndex].trim());
+        }
         break;
       }
     }
@@ -166,7 +171,7 @@ export async function cleanExistingFrontMatter(store) {
       if (replacements.size) plans.push({ workId: work.id, chapterId: chapter.id, replacements });
     }
   }
-  if (!plans.length && !removedChapters.size) return 0;
+  if (!plans.length && !removedChapters.size && !chapterTitles.size) return 0;
 
   await store.update((current) => {
     for (const [workId, ids] of removedChapters) {
@@ -177,6 +182,12 @@ export async function cleanExistingFrontMatter(store) {
         if (ids.has(current.translations[key].chapterId)) delete current.translations[key];
       }
       work.updatedAt = Date.now();
+    }
+    for (const [key, title] of chapterTitles) {
+      const [workId, chapterId] = key.split("|");
+      const work = current.works[workId];
+      const chapter = work?.chapters?.find((item) => item.id === chapterId);
+      if (chapter && title) chapter.title = title;
     }
     for (const plan of plans) {
       const work = current.works[plan.workId];
@@ -198,7 +209,12 @@ export async function cleanExistingFrontMatter(store) {
     }
   });
   await store.flush();
-  return plans.length + [...removedChapters.values()].reduce((count, ids) => count + ids.size, 0);
+  const affected = new Set([
+    ...plans.map(({ workId, chapterId }) => `${workId}|${chapterId}`),
+    ...[...removedChapters].flatMap(([workId, ids]) => [...ids].map((chapterId) => `${workId}|${chapterId}`)),
+    ...chapterTitles.keys(),
+  ]);
+  return affected.size;
 }
 
 export const volumeLabel = (v) => String(v ?? "").trim();

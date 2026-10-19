@@ -82,8 +82,20 @@ describe("chapter splitting (bulk upload)", () => {
     assert.equal(count, 1);
     const after = await getChapter(store, { workId: work.workId, chapterId: work.chapterId });
     assert.equal(after.original, "Prolog\nActual story starts here.");
+    assert.equal(after.chapter.title, "Prolog", "the old Front Matter label is corrected to the detected prologue heading");
     assert.equal(after.available.length, 0, "translations of the changed source must not be displayed");
     assert.equal(await cleanExistingFrontMatter(store), 0, "cleanup is idempotent");
+  });
+  it("renames an existing Front Matter chapter when its stored source begins with a prologue", async () => {
+    const work = await ingestText(store, {
+      title: "Relabel front matter", sourceLang: "en", chapterTitle: "Front Matter",
+      text: "Prologue\nThe actual first lines.",
+    });
+    assert.equal(await cleanExistingFrontMatter(store), 1);
+    const cleaned = await getChapter(store, { workId: work.workId, chapterId: work.chapterId });
+    assert.equal(cleaned.chapter.title, "Prologue");
+    assert.equal(cleaned.original, "Prologue\nThe actual first lines.");
+    assert.equal(await cleanExistingFrontMatter(store), 0, "relabeling is idempotent");
   });
   it("removes earlier front-matter chapter records once a later prologue is identified", async () => {
     const front = await ingestText(store, {
