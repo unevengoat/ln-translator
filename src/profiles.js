@@ -126,6 +126,7 @@ export async function deleteProfile(store, id) {
   const db = await load(store);
   const i = db.profiles.findIndex((p) => p.id === id);
   if (i < 0) throw new Error("Unknown profile.");
+  if (db.profiles.length <= 1) throw new Error("The last profile cannot be deleted.");
   const [removed] = db.profiles.splice(i, 1);
   for (const [t, v] of Object.entries(db.tokens)) if (v.profileId === id) delete db.tokens[t];
   await save(store, db);

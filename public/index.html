@@ -41,6 +41,7 @@
     </nav>
     <span class="spacer"></span>
     <button id="switchProfileBtn" class="ghost" title="Switch profile">Switch profile</button>
+    <button id="manageProfilesAppBtn" class="ghost" type="button">Manage profiles</button>
     <button id="whoami" class="avatar-btn" title="Profile menu">🦊</button>
   </header>
 
@@ -233,7 +234,7 @@
         <div id="tokenBox" class="hint"></div>
         <div id="poolBox" class="hint"></div>
         <h2>Storage, backups &amp; updates</h2>
-        <p class="hint">The library lives outside the app container, so redeploys and idle sleep never lose data. Saves write immediately; if you edit storage by hand this instance picks it up within ~2 minutes, or press reload.</p>
+        <p class="hint">The library lives outside the app container, so redeploys and idle sleep never lose data. Saves write immediately; if you edit storage by hand this instance picks it up within ~2 minutes, or press reload. A local workspace uses a separate disk library unless connected to the same durable storage as the live site.</p>
         <div class="row">
           <button id="reloadStore" class="ghost" type="button">Reload library from storage</button>
           <button id="exportAll" class="ghost" type="button">Export everything (JSON)</button>

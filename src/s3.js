@@ -69,6 +69,13 @@ export class S3Client {
     return res.text();
   }
 
+  async getBuffer(key) {
+    const res = await this.request("GET", key);
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`R2 GET ${key} → ${res.status}`);
+    return Buffer.from(await res.arrayBuffer());
+  }
+
   async exists(key) {
     const res = await this.request("HEAD", key);
     return res.ok;

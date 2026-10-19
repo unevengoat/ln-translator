@@ -28,6 +28,38 @@ describe("local backend store", () => {
     assert.equal((await fresh.loadTm("w1", "en")).abc.text, "translated");
   });
 
+  it("reload flushes pending local writes before replacing its in-memory snapshot", async () => {
+    const store = new Store(new LocalBackend(dir), { debounceMs: 60000 });
+    await store.load();
+    await store.update((db) => { db.works.beforeReload = { id: "beforeReload", title: "Unsaved work" }; });
+    await store.reload();
+    assert.equal(store.db.works.beforeReload.title, "Unsaved work");
+
+    const fresh = new Store(new LocalBackend(dir), { debounceMs: 1 });
+    await fresh.load();
+    assert.equal(fresh.db.works.beforeReload.title, "Unsaved work");
+  });
+
+  it("refresh skips a pending local write instead of discarding it", async () => {
+    const store = new Store(new LocalBackend(dir), { debounceMs: 60000 });
+    await store.load();
+    store.lastCheck = 0;
+    await store.update((db) => { db.works.pendingRefresh = { id: "pendingRefresh", title: "Pending" }; });
+    assert.equal(await store.maybeRefresh(0), false);
+    assert.equal(store.db.works.pendingRefresh.title, "Pending");
+    await store.flush();
+  });
+
+  it("persists binary files and removes them from local storage", async () => {
+    const store = new Store(new LocalBackend(dir), { debounceMs: 1 });
+    const bytes = Buffer.from([0, 127, 255]);
+    await store.saveBuffer("covers/work.png", bytes, "image/png");
+    const fresh = new Store(new LocalBackend(dir), { debounceMs: 1 });
+    assert.deepEqual(await fresh.loadBuffer("covers/work.png"), bytes);
+    await fresh.deleteFile("covers/work.png");
+    assert.equal(await fresh.loadBuffer("covers/work.png"), null);
+  });
+
   it("stores each text blob once (hash dedupe)", async () => {
     const store = new Store(new LocalBackend(dir), { debounceMs: 1 });
     const a = await store.saveText("same content");
@@ -55,6 +87,38 @@ describe("local backend store", () => {
 });
 
 describe("github backend (durable, free)", () => {
+  it("writes, reads and removes binary files through the contents API", async () => {
+    const files = new Map();
+    let serial = 0;
+    const fetchFn = async (url, opts = {}) => {
+      const p = decodeURIComponent(String(url).split("/contents/")[1]?.split("?")[0] || "");
+      const current = files.get(p);
+      if (!opts.method || opts.method === "GET") {
+        if (!current) return { status: 404, ok: false, json: async () => ({}) };
+        if (opts.headers?.Accept?.includes("raw")) return { status: 200, ok: true, arrayBuffer: async () => current.bytes.buffer.slice(current.bytes.byteOffset, current.bytes.byteOffset + current.bytes.byteLength) };
+        return { status: 200, ok: true, json: async () => ({ sha: current.sha }) };
+      }
+      if (opts.method === "PUT") {
+        const body = JSON.parse(opts.body);
+        const bytes = Buffer.from(body.content, "base64");
+        const sha = `sha-${++serial}`;
+        files.set(p, { bytes, sha });
+        return { status: 201, ok: true, json: async () => ({ content: { sha } }) };
+      }
+      if (opts.method === "DELETE") {
+        files.delete(p);
+        return { status: 200, ok: true };
+      }
+      throw new Error(`Unexpected ${opts.method}`);
+    };
+    const backend = new GitHubBackend({ repo: "me/data", token: "t", fetchFn });
+    const bytes = Buffer.from([0, 127, 255]);
+    await backend.putBuffer("covers/work.png", bytes, "image/png");
+    assert.deepEqual(await backend.getBuffer("covers/work.png"), bytes);
+    await backend.delete("covers/work.png");
+    assert.equal(await backend.getBuffer("covers/work.png"), null);
+  });
+
   it("reads, writes with sha handling, and retries on a stale sha", async () => {
     const files = new Map(); // path -> {content, sha}
     let puts = 0, conflicts = 0;

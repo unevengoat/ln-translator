@@ -5,6 +5,7 @@
 const CJK = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]/g;
 const KANA_HANGUL = /[\u3040-\u30ff\uac00-\ud7af]/g;
 const CJK_TARGETS = new Set(["ja", "zh-CN", "zh-TW", "ko", "th", "my"]);
+const ENGLISH_OPENERS = new Set(`a an and are as at be been being but by can could did do does for from had has have he her him his i if in into is it its just like may might must of on or our she should so than that the their them then there these they this those to was we were well will with would you your think`.split(/\s+/));
 
 /** Difficulty levels for the same chapter. Terms are shared; only wording changes. */
 export const DIFFICULTIES = ["easy", "medium", "hard"];
@@ -65,35 +66,54 @@ export function lintTranslation(source, translation, { target = "en", glossary =
     }
   }
 
-  // 2. Glossary terms that appear in the source but not in the output.
+  // 2. Glossary terms should be checked only when they actually contain a
+  // distinctive name/term. Sentence-initial common words are not glossary QA.
+  const ordinaryTerms = new Set(`a an and are as at be been being but by can could did do does for from had has have he her him his i if in into is it its just like may might must of on or our she should so than that the their them then there these they this those to was we were will with would you your well other mana`.split(/\s+/));
   const missing = [];
+  const normalize = (value) => String(value).toLocaleLowerCase().replace(/[\s\p{P}\p{S}]/gu, "");
+  const normalizedOutput = normalize(out);
   for (const g of glossary || []) {
-    if (g.source && g.target && src.includes(g.source) && !out.includes(g.target)) missing.push(`${g.source}→${g.target}`);
+    if (!g.source || !g.target) continue;
+    const source = String(g.source).trim();
+    const targetTerm = String(g.target).trim();
+    if (!source || !targetTerm || ordinaryTerms.has(source.toLowerCase()) || ordinaryTerms.has(targetTerm.toLowerCase())) continue;
+    if (!src.includes(source) || normalize(source) === normalize(targetTerm)) continue;
+    // Be tolerant of case, punctuation and whitespace changes in model output.
+    if (normalizedOutput.includes(normalize(targetTerm))) continue;
+    missing.push(`${source}→${targetTerm}`);
   }
   if (missing.length) {
-    warnings.push({ code: "term-missing", severity: "warn", detail: `Expected term(s) missing from output: ${missing.slice(0, 6).join(", ")}`, sample: missing.slice(0, 6).join(", ") });
+    warnings.push({ code: "term-missing", severity: "warn", detail: `Expected distinctive term(s) missing: ${[...new Set(missing)].slice(0, 4).join(", ")}`, sample: [...new Set(missing)].slice(0, 4).join(", ") });
   }
 
-  // 3. Suspiciously short output (dropped content).
+  // 3. English discourse words copied at the start of Swedish sentences.
+  if (target === "sv") {
+    const leaked = [];
+    for (const sentence of out.split(/[.!?…]+|\n+/)) {
+      const first = sentence.trim().match(/^[\u201c\"'(\[]*([A-Za-z]+)/)?.[1];
+      if (first && ENGLISH_OPENERS.has(first.toLocaleLowerCase())) leaked.push(first);
+    }
+    if (leaked.length) warnings.push({ code: "english-opener", severity: "warn", detail: `Possible English sentence starter(s) in Swedish: ${[...new Set(leaked)].slice(0, 5).join(", ")}.`, sample: [...new Set(leaked)].slice(0, 5).join(", ") });
+  }
+
+  // 4. Suspiciously short output (dropped content).
   if (src.trim().length > 120 && out.trim().length < src.trim().length * 0.2) {
     warnings.push({ code: "too-short", severity: "error", detail: `Output looks too short (${out.trim().length} vs ${src.trim().length} source chars) — content may be missing.` });
   }
 
-  // 4. Repeated-text loop (a classic LLM failure).
+  // 5. Repeated-text loop (a classic LLM failure).
   const half = Math.floor(out.length / 2);
   if (out.length > 200 && out.slice(0, half).trim() === out.slice(half).trim()) {
     warnings.push({ code: "repetition", severity: "error", detail: "Output appears to repeat itself — likely a model loop." });
   }
 
-  // 5. Unbalanced quotes (formatting damage).
-  const pairs = [['"', '"'], ["\u201c", "\u201d"], ["\u00ab", "\u00bb"], ["\u300c", "\u300d"], ["\u2018", "\u2019"]];
-  for (const [open, close] of pairs) {
-    const a = (out.match(new RegExp(open.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) || []).length;
-    const b = (out.match(new RegExp(close.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) || []).length;
-    if (open !== close && a !== b) warnings.push({ code: "quotes", severity: "warn", detail: `Unbalanced ${open}${close} quotes (${a} vs ${b}).` });
-  }
+  // 6. Check only straight double quotes. Curly/localized quote glyph usage
+  // varies across providers and chapters, so comparing their types creates too
+  // many false positives; single quotes/apostrophes are not dialogue delimiters.
+  const straightQuotes = (out.match(/\"/g) || []).length;
+  if (straightQuotes % 2) warnings.push({ code: "quotes", severity: "warn", detail: `Possible unmatched straight dialogue quote (${straightQuotes} marks).` });
 
-  // 6. Model commentary leaking into the output.
+  // 7. Model commentary leaking into the output.
   if (/\b(here is the translation|as an ai|i cannot translate|note:)\b/i.test(out)) {
     warnings.push({ code: "commentary", severity: "warn", detail: "Output contains translator commentary instead of only the translation." });
   }

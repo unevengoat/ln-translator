@@ -16,10 +16,12 @@ import {
   ingestText, bulkIngest, splitChapters, translateChapter, translateWholeStory, correctTerm,
   listWorks, getWork, getChapter, stats, searchLibrary, activityFeed, updateWork,
   deleteChapter, deleteWork, restoreVersion, suggestTerms, importGlossary, exportGlossary, parseTermInput, cleanExistingFrontMatter,
+  saveWorkCover, getWorkCover, deleteWorkCover,
 } from "../src/library.js";
 import { mergeTerms, termsGlossary, canonicalFor, extractCandidates, termsToCsv, termCounts, latinCandidates, cleanNoisyTerms } from "../src/terms.js";
 import { lintTranslation, summarizeWarnings, normalizeDifficulty, cleanTranslationArtifacts, DIFFICULTIES } from "../src/qa.js";
 import { isModelGone, pickCandidates, translateWithPolicy } from "../src/engines/models.js";
+import { translatePinned } from "../src/engines/pool.js";
 
 let dir, store;
 before(async () => { dir = await mkdtemp(path.join(tmpdir(), "ln-lib-")); store = new Store(new LocalBackend(dir), { debounceMs: 1 }); });
@@ -46,6 +48,7 @@ describe("chapter splitting (bulk upload)", () => {
     assert.match(parts[0].title, /Chapter 1/);
     assert.match(parts[1].title, /Chapter 2/);
     assert.equal(splitChapters("第1話 始まり\n本文。\n\n第2話 続き\n本文。").length, 2);
+    assert.equal(splitChapters("Kapitel1Start\nText\nKapitel2Next\nMore").length, 2);
   });
   it("returns one chapter when there are no markers", () => {
     assert.equal(splitChapters("Just a wall of text with no markers.").length, 1);
@@ -312,6 +315,34 @@ describe("ingest, dedupe, versions", () => {
 });
 
 describe("translation, memory, model pinning", () => {
+  it("translates a longer chapter across chunks and reuses the saved segments", async () => {
+    const t = makeTranslator();
+    const text = Array.from({ length: 24 }, (_, i) => `Paragraph ${i + 1}: ${"A longer sentence about the castle and its inhabitants. ".repeat(4)}`).join("\n\n");
+    const a = await ingestText(store, { title: "Long Chapter Resume", sourceLang: "en", text, translate: t });
+    const first = await translateChapter(store, { workId: a.workId, chapterId: a.chapterId, target: "sv", translate: t });
+    assert.ok(first.chunks > 1, "the chapter must be chunked");
+    assert.equal(t.calls.length, first.chunks);
+    assert.ok(first.translation.includes("Paragraph 24"));
+    const calls = t.calls.length;
+    const second = await translateChapter(store, { workId: a.workId, chapterId: a.chapterId, target: "sv", translate: t });
+    assert.equal(second.cached, true);
+    assert.equal(t.calls.length, calls, "all completed chunks should be reused");
+  });
+
+  it("reuses the loaded chapter for local term candidates instead of refetching source blobs", async () => {
+    const t = makeTranslator();
+    const added = await ingestText(store, { title: "Term Warmup Read Count", sourceLang: "en", text: "A chapter with Alice and Bob.", translate: t });
+    const loadText = store.loadText.bind(store);
+    let reads = 0;
+    store.loadText = async (...args) => { reads++; return loadText(...args); };
+    try {
+      await translateChapter(store, { workId: added.workId, chapterId: added.chapterId, target: "sv", translate: t });
+      assert.equal(reads, 1, "translation should load the current chapter once and reuse it for local term candidates");
+    } finally {
+      store.loadText = loadText;
+    }
+  });
+
   it("translates once then serves from memory", async () => {
     const t = makeTranslator();
     const a = await ingestText(store, { title: "TM Story", sourceLang: "ja", text: "こんにちは。\n\nさようなら。", translate: t });
@@ -522,9 +553,49 @@ describe("QA lint", () => {
     assert.ok(lintTranslation("a".repeat(300), "x".repeat(250) + "x".repeat(250)).some((x) => x.code === "repetition"));
     assert.ok(lintTranslation("hello", "Here is the translation: hi").some((x) => x.code === "commentary"));
   });
-  it("passes a good translation of a CJK source", () => {
-    const w = lintTranslation("キリトは剣を抜いた。", "Kirito drew his sword.", { target: "en", glossary: [{ source: "キリト", target: "Kirito" }] });
+  it("passes a good translation of a CJK source and tolerates glossary case/punctuation", () => {
+    const w = lintTranslation("キリトは剣を抜いた。", "KIRITO drew his sword!", { target: "en", glossary: [{ source: "キリト", target: "Kirito." }] });
     assert.equal(summarizeWarnings(w).ok, true);
+  });
+  it("flags English discourse starters in Swedish, not translated Swedish equivalents", () => {
+    const warnings = lintTranslation("source", "Think på barn. Well, det fanns. Som vanligt.", { target: "sv" });
+    const english = warnings.find((warning) => warning.code === "english-opener");
+    assert.ok(english);
+    assert.match(english.sample, /Think/);
+    assert.match(english.sample, /Well/);
+    const quoted = lintTranslation("source", "“Well, det fanns.” Hon öppnade dörren.", { target: "sv" });
+    assert.match(quoted.find((warning) => warning.code === "english-opener").sample, /Well/);
+    assert.doesNotMatch(english.sample, /Som/);
+    assert.equal(lintTranslation("source", "“Hon öppnade dörren.” Han gick in.", { target: "sv" }).some((warning) => warning.code === "quotes"), false);
+  });
+  it("does not flag chapter quotes split across translation chunks", async () => {
+    const translate = async (chunk) => ({ text: chunk, provider: "test", model: "test" });
+    const source = `“${"First paragraph. ".repeat(80)}\n\n${"Second paragraph. ".repeat(80)}”`;
+    const added = await ingestText(store, { title: "Quotes Across Chunks", sourceLang: "en", text: source });
+    const result = await translateChapter(store, { workId: added.workId, chapterId: added.chapterId, target: "sv", translate });
+    assert.ok(result.chunks > 1);
+    assert.equal(result.warnings.some((warning) => warning.code === "quotes"), false);
+  });
+});
+
+describe("book covers", () => {
+  it("persists, replaces and removes binary cover images", async () => {
+    const added = await ingestText(store, { title: "Cover Story", sourceLang: "en", text: "A chapter." });
+    const first = Buffer.from([0, 1, 2, 255]);
+    await saveWorkCover(store, added.workId, first, "image/png");
+    const saved = await getWorkCover(store, added.workId);
+    assert.equal(saved.contentType, "image/png");
+    assert.deepEqual(saved.body, first);
+    assert.ok((await getWork(store, added.workId)).coverUrl.includes("/cover?v="));
+
+    const second = Buffer.from([10, 20, 30]);
+    await saveWorkCover(store, added.workId, second, "image/jpeg");
+    assert.deepEqual((await getWorkCover(store, added.workId)).body, second);
+    assert.equal(await store.loadBuffer(`covers/${added.workId}.png`), null);
+
+    assert.deepEqual(await deleteWorkCover(store, added.workId), { removed: true });
+    assert.equal(await getWorkCover(store, added.workId), null);
+    assert.equal((await getWork(store, added.workId)).coverUrl, null);
   });
 });
 
@@ -534,6 +605,99 @@ describe("model policy", () => {
     assert.equal(isModelGone(429, "Rate limit exceeded"), false);
     assert.deepEqual(pickCandidates("groq", ["whisper-large-v3", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"]), ["openai/gpt-oss-120b", "qwen/qwen3.8-27b"]);
   });
+  it("uses the pinned model without an extra provider model-catalog request", async () => {
+    const requests = [];
+    const fetchFn = async (url) => {
+      requests.push(String(url));
+      if (String(url).endsWith("/models")) return { ok: false, status: 500, text: async () => "catalog unavailable" };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "PINNED" } }] }) };
+    };
+    const r = await translateWithPolicy("test", {
+      source: "ja", target: "en", pinned: { provider: "groq", model: "openai/gpt-oss-120b" }, fetchFn,
+    });
+    assert.equal(r.text, "PINNED");
+    assert.equal(requests.length, 1);
+    assert.match(requests[0], /chat\/completions$/);
+  });
+
+  it("only queries model catalog when a pinned model has been retired", async () => {
+    const requests = [];
+    const fetchFn = async (url) => {
+      requests.push(String(url));
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "openai/gpt-oss-20b" }] }) };
+      if (String(url).endsWith("/chat/completions") && requests.filter((x) => x.endsWith("/chat/completions")).length === 1) {
+        return { ok: false, status: 404, text: async () => "model not found" };
+      }
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "FALLBACK" } }] }) };
+    };
+    const r = await translateWithPolicy("test", {
+      source: "ja", target: "en", pinned: { provider: "groq", model: "retired-model" }, fetchFn,
+    });
+    assert.equal(r.text, "FALLBACK");
+    assert.ok(requests.some((x) => x.endsWith("/models")));
+    assert.equal(requests.filter((x) => x.endsWith("/chat/completions")).length, 2);
+  });
+
+  it("serializes parallel requests to the same pinned provider", async () => {
+    const previous = {
+      gap: process.env.POOL_MIN_GAP_MS,
+      apiKey: process.env.AI_API_KEY,
+      baseUrl: process.env.AI_BASE_URL,
+    };
+    process.env.POOL_MIN_GAP_MS = "0";
+    process.env.AI_API_KEY = "test-key";
+    process.env.AI_BASE_URL = "https://parallel-queue-test.invalid/v1";
+    let active = 0;
+    let maxActive = 0;
+    const fetchFn = async () => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      active--;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "QUEUED" } }] }) };
+    };
+    try {
+      await Promise.all(Array.from({ length: 5 }, (_, i) => translatePinned(String(i), { source: "ja", target: "en", fetchFn }, { provider: "parallel-queue-test", model: "test-model" })));
+      assert.equal(maxActive, 1, "one active request per provider");
+    } finally {
+      if (previous.gap === undefined) delete process.env.POOL_MIN_GAP_MS;
+      else process.env.POOL_MIN_GAP_MS = previous.gap;
+      if (previous.apiKey === undefined) delete process.env.AI_API_KEY;
+      else process.env.AI_API_KEY = previous.apiKey;
+      if (previous.baseUrl === undefined) delete process.env.AI_BASE_URL;
+      else process.env.AI_BASE_URL = previous.baseUrl;
+    }
+  });
+
+  it("pinned translations obey per-provider pacing after a request completes", async () => {
+    const previous = {
+      gap: process.env.POOL_MIN_GAP_MS,
+      apiKey: process.env.AI_API_KEY,
+      baseUrl: process.env.AI_BASE_URL,
+    };
+    process.env.POOL_MIN_GAP_MS = "20";
+    process.env.AI_API_KEY = "test-key";
+    process.env.AI_BASE_URL = "https://pacing-test.invalid/v1";
+    const requests = [];
+    const fetchFn = async (url) => {
+      requests.push({ url: String(url), at: Date.now() });
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "PINNED" } }] }) };
+    };
+    try {
+      await translatePinned("one", { source: "ja", target: "en", fetchFn }, { provider: "pacing-test", model: "test-model" });
+      await translatePinned("two", { source: "ja", target: "en", fetchFn }, { provider: "pacing-test", model: "test-model" });
+      assert.equal(requests.length, 2);
+      assert.ok(requests[1].at - requests[0].at >= 20, "consecutive provider requests honor the pacing gap");
+    } finally {
+      if (previous.gap === undefined) delete process.env.POOL_MIN_GAP_MS;
+      else process.env.POOL_MIN_GAP_MS = previous.gap;
+      if (previous.apiKey === undefined) delete process.env.AI_API_KEY;
+      else process.env.AI_API_KEY = previous.apiKey;
+      if (previous.baseUrl === undefined) delete process.env.AI_BASE_URL;
+      else process.env.AI_BASE_URL = previous.baseUrl;
+    }
+  });
+
   it("retries a transient 429 then succeeds", async () => {
     let n = 0;
     const fetchFn = async () => {
