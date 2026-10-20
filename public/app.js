@@ -30,7 +30,7 @@ const FONTS = {
   dyslexic: "'Comic Sans MS', Verdana, Tahoma, sans-serif",
   mono: "ui-monospace, Consolas, 'Courier New', monospace",
 };
-const DEFAULT_LOOK = { theme: "dark", font: "serif", size: 18, line: "1.7", width: "46rem", bg: "plain", spacing: "0", justify: false };
+const DEFAULT_LOOK = { theme: "dark", font: "serif", size: 18, line: "1.7", width: "46rem", bg: "plain", spacing: "0", paragraphSpacing: "normal", customBg: "#121214", customInk: "#eceaf0", customAccent: "#e50914", justify: false };
 
 let LANG = [], PROFILES = [], me = null, LANG_NAMES = {};
 let state = { progress: {}, myList: [], look: { ...DEFAULT_LOOK }, level: "medium" };
@@ -117,7 +117,7 @@ async function showGate() {
   $("appShell").classList.add("hidden");
   $("gateProfiles").innerHTML = PROFILES.map((p) => `
     <button class="gate-profile" data-id="${p.id}">
-      <span class="gate-avatar" style="background:${p.color || "#333"}">${esc(p.avatar || "🙂")}</span>
+      <span class="gate-avatar" style="background:${p.color || "#333"}">${p.avatarUrl ? `<img src="${esc(p.avatarUrl)}" alt="">` : esc(p.avatar || "🙂")}</span>
       <small>${esc(p.name)}${p.hasPin ? " 🔒" : ""}</small>
     </button>`).join("") || `<p class="hint">No profiles yet — create one to start.</p>`;
   document.querySelectorAll(".gate-profile").forEach((b) => (b.onclick = () => signIn(b.dataset.id)));
@@ -150,8 +150,8 @@ async function enterApp(profile) {
   me = profile;
   $("gate").classList.add("hidden");
   $("appShell").classList.remove("hidden");
-  $("whoami").textContent = me.avatar || "🙂";
-  $("menuAvatar").textContent = me.avatar || "🙂";
+  setProfileAvatar(me);
+  setProfileAvatar(me, $("menuAvatar"));
   $("menuName").textContent = me.name;
   try {
     state = await API(`/api/profiles/${me.id}/state`);
@@ -201,7 +201,7 @@ function profileManageBody() {
     <div class="profile-manage-list">${PROFILES.map((p) => {
       const canDelete = !!me && PROFILES.length > 1;
       const reason = !me ? "Sign in before deleting profiles" : PROFILES.length <= 1 ? "At least one profile must remain" : "Delete profile";
-      return `<div class="profile-manage-item"><span class="gate-avatar" style="background:${p.color || "#333"}">${esc(p.avatar || "🙂")}</span><strong>${esc(p.name)}</strong><span class="hint">${p.hasPin ? "PIN protected" : "No PIN"}${me?.id === p.id ? " · you" : ""}</span><button class="ghost profile-delete" data-delete-profile="${esc(p.id)}" type="button" ${canDelete ? "" : `disabled title="${reason}"`}>Delete</button></div>`;
+      return `<div class="profile-manage-item"><span class="gate-avatar" style="background:${p.color || "#333"}">${p.avatarUrl ? `<img src="${esc(p.avatarUrl)}" alt="">` : esc(p.avatar || "🙂")}</span><strong>${esc(p.name)}</strong><span class="hint">${p.hasPin ? "PIN protected" : "No PIN"}${me?.id === p.id ? " · you" : ""}</span><button class="ghost profile-delete" data-delete-profile="${esc(p.id)}" type="button" ${canDelete ? "" : `disabled title="${reason}"`}>Delete</button></div>`;
     }).join("")}</div>`;
 }
 async function manageProfiles() {
@@ -236,6 +236,43 @@ $("switchProfileBtn").onclick = () => showGate();
 document.addEventListener("click", (e) => {
   if (!e.target.closest("#profileMenu") && !e.target.closest("#whoami")) $("profileMenu").classList.add("hidden");
 });
+function setProfileAvatar(profile, element = $("whoami")) {
+  if (!element) return;
+  element.replaceChildren();
+  if (profile?.avatarUrl) {
+    const image = document.createElement("img");
+    image.src = profile.avatarUrl;
+    image.alt = "";
+    element.appendChild(image);
+  } else element.textContent = profile?.avatar || "🙂";
+}
+
+document.addEventListener("change", async (e) => {
+  if (e.target.id !== "profileAvatarFile") return;
+  const file = e.target.files?.[0];
+  if (!file) return;
+  if (!["image/jpeg", "image/png", "image/webp", "image/gif"].includes(file.type) || file.size > 1_500_000) {
+    toast("Choose a JPEG, PNG, WebP or GIF under 1.5 MB.", "warn");
+    e.target.value = "";
+    return;
+  }
+  try {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error("Could not read image file."));
+      reader.readAsDataURL(file);
+    });
+    const result = await post(`/api/profiles/${me.id}/avatar`, { dataUrl });
+    me = result.profile;
+    setProfileAvatar(me); setProfileAvatar(me, $("menuAvatar"));
+    const hint = $("avatarUploadHint");
+    if (hint) hint.textContent = "Picture saved to your profile.";
+    toast("Profile picture saved", "ok");
+  } catch (err) { toast(err.message, "error"); }
+  finally { e.target.value = ""; }
+});
+
 $("profileMenu").addEventListener("click", async (e) => {
   const what = e.target.dataset?.menu;
   if (!what) return;
@@ -247,8 +284,10 @@ $("profileMenu").addEventListener("click", async (e) => {
       <label>Name <input id="epName" value="${esc(me.name)}"></label>
       <label>New PIN <input id="epPin" type="password" placeholder="${me.hasPin ? "leave empty to keep" : "set one (optional)"}"></label>
       <label class="chip"><input type="checkbox" id="epClearPin"> Remove PIN</label>
-      <div class="hint">Avatar:</div>
-      <div class="avatar-picker" id="npAvatars">${AVATARS.map((a, i) => `<button data-i="${i}" class="${a === me.avatar ? "sel" : ""}">${a}</button>`).join("")}</div>`;
+      <div class="hint">Avatar or custom picture:</div>
+      <div class="avatar-picker" id="npAvatars">${AVATARS.map((a, i) => `<button data-i="${i}" class="${a === me.avatar ? "sel" : ""}">${a}</button>`).join("")}</div>
+      <label class="file ghost avatar-upload-label">📷 Upload picture <input id="profileAvatarFile" type="file" accept="image/jpeg,image/png,image/webp,image/gif" hidden></label>
+      <span id="avatarUploadHint" class="hint">JPEG, PNG, WebP or GIF · max 1.5 MB</span>`;
     const res = await modal({ title: "Edit profile", body, ok: "Save" });
     if (!res.ok) return;
     const payload = { name: (res.values.epName || "").trim(), avatar: AVATARS[res.values.__avatarIndex] || me.avatar };
@@ -257,7 +296,7 @@ $("profileMenu").addEventListener("click", async (e) => {
     else if (pin) payload.pin = pin;
     try {
       const r = await patch(`/api/profiles/${me.id}`, payload);
-      me = r; $("whoami").textContent = me.avatar; $("menuAvatar").textContent = me.avatar; $("menuName").textContent = me.name;
+      me = r; setProfileAvatar(me); setProfileAvatar(me, $("menuAvatar")); $("menuName").textContent = me.name;
       toast("Profile updated", "ok");
       if (payload.pin !== undefined) { TOKEN = null; LS.del("token"); showGate(); }
     } catch (e) { toast(e.message, "error"); }
@@ -877,6 +916,10 @@ function bindUi() {
   $("pageBg").onchange = () => { state.look.bg = $("pageBg").value; persistLook(); };
   $("letterSpacing").onchange = () => { state.look.spacing = $("letterSpacing").value; persistLook(); };
   $("justifyText").onchange = () => { state.look.justify = $("justifyText").checked; persistLook(); };
+  $("paragraphSpacing").onchange = () => { state.look.paragraphSpacing = $("paragraphSpacing").value; persistLook(); };
+  for (const [id, key] of [["customBg", "customBg"], ["customInk", "customInk"], ["customAccent", "customAccent"]]) {
+    $(id).oninput = () => { state.look.theme = "custom"; state.look[key] = $(id).value; $("theme").value = "custom"; persistLook(); };
+  }
 }
 function persistLook() { applyLook(); saveStateSoon({ look: state.look }); $("lookSaved").textContent = "saved to your profile"; setTimeout(() => ($("lookSaved").textContent = ""), 1500); }
 function applyLook() {
@@ -885,7 +928,16 @@ function applyLook() {
   $("theme").value = l.theme; $("fontFamily").value = l.font; $("fontSize").value = l.size;
   $("lineHeight").value = l.line; $("readWidth").value = l.width; $("pageBg").value = l.bg;
   $("letterSpacing").value = l.spacing; $("justifyText").checked = !!l.justify;
+  $("paragraphSpacing").value = l.paragraphSpacing;
+  $("customBg").value = l.customBg; $("customInk").value = l.customInk; $("customAccent").value = l.customAccent;
+  $("customColors").classList.toggle("hidden", l.theme !== "custom");
   document.documentElement.dataset.theme = l.theme === "auto" ? "" : l.theme;
+  document.documentElement.style.setProperty("--custom-bg", l.customBg);
+  document.documentElement.style.setProperty("--custom-ink", l.customInk);
+  document.documentElement.style.setProperty("--custom-accent", l.customAccent);
+  const bgHex = l.customBg.replace("#", "");
+  const rgb = bgHex.match(/.{2}/g)?.map((x) => parseInt(x, 16)) || [18, 18, 20];
+  document.documentElement.style.setProperty("--custom-scheme", (rgb[0] * 299 + rgb[1] * 587 + rgb[2] * 114) / 1000 > 150 ? "light" : "dark");
   document.body.dataset.pagebg = l.bg;
   for (const el of [$("readerBody"), $("readerBody2")]) {
     el.style.fontFamily = FONTS[l.font] || FONTS.serif;
@@ -893,9 +945,13 @@ function applyLook() {
     el.style.lineHeight = l.line;
     el.style.letterSpacing = l.spacing;
     el.classList.toggle("justify", !!l.justify);
+    el.dataset.spacing = l.paragraphSpacing;
   }
   document.documentElement.style.setProperty("--read-width", l.width);
   document.documentElement.style.setProperty("--read-space", (l.size * 0.75).toFixed(0) + "px");
+  document.documentElement.style.setProperty("--reader-size", `${l.size}px`);
+  document.documentElement.style.setProperty("--reader-line", l.line);
+  document.documentElement.style.setProperty("--reader-spacing", l.spacing);
 }
 function registerPWA() { if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {}); }
 

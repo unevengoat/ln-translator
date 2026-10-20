@@ -66,24 +66,33 @@ export function lintTranslation(source, translation, { target = "en", glossary =
     }
   }
 
-  // 2. Glossary terms should be checked only when they actually contain a
-  // distinctive name/term. Sentence-initial common words are not glossary QA.
-  const ordinaryTerms = new Set(`a an and are as at be been being but by can could did do does for from had has have he her him his i if in into is it its just like may might must of on or our she should so than that the their them then there these they this those to was we were will with would you your well other mana`.split(/\s+/));
+  // 2. Glossary terms should be distinctive names/concepts, not generic words.
+  // Frequently auto-suggested terms such as "Sure" and "Like" are not reliably
+  // expected verbatim in translation and caused noisy warnings.
+  const ordinaryTerms = new Set(`a an and are as at be been being but by can could did do does for from had has have he her him his i if in into is it its just like may might must of on or our she should so than that the their them then there these they this those to was we were will with would you your well other sure let think`.split(/\s+/));
+  const isOrdinary = (value) => {
+    const words = String(value).toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
+    return words.length > 0 && words.length <= 3 && words.every((word) => ordinaryTerms.has(word));
+  };
   const missing = [];
-  const normalize = (value) => String(value).toLocaleLowerCase().replace(/[\s\p{P}\p{S}]/gu, "");
-  const normalizedOutput = normalize(out);
+  const normalize = (value) => String(value).toLocaleLowerCase().replace(/[\p{P}\p{S}]+/gu, " ").replace(/\s+/g, " ").trim();
+  const normalizedOutput = ` ${normalize(out)} `;
   for (const g of glossary || []) {
     if (!g.source || !g.target) continue;
     const source = String(g.source).trim();
     const targetTerm = String(g.target).trim();
-    if (!source || !targetTerm || ordinaryTerms.has(source.toLowerCase()) || ordinaryTerms.has(targetTerm.toLowerCase())) continue;
+    if (!source || !targetTerm || isOrdinary(source) || isOrdinary(targetTerm)) continue;
     if (!src.includes(source) || normalize(source) === normalize(targetTerm)) continue;
-    // Be tolerant of case, punctuation and whitespace changes in model output.
-    if (normalizedOutput.includes(normalize(targetTerm))) continue;
+    // Discard punctuation in both strings, but require Latin terms to match as
+    // a whole word; "Al" must not be accepted merely because output says "also".
+    const normalizedTerm = normalize(targetTerm);
+    const containsCjk = normalizedTerm.split("").some((char) => char.charCodeAt(0) > 0x2fff);
+    if (normalizedTerm && (containsCjk ? normalize(out).includes(normalizedTerm) : normalizedOutput.includes(` ${normalizedTerm} `))) continue;
     missing.push(`${source}→${targetTerm}`);
   }
-  if (missing.length) {
-    warnings.push({ code: "term-missing", severity: "warn", detail: `Expected distinctive term(s) missing: ${[...new Set(missing)].slice(0, 4).join(", ")}`, sample: [...new Set(missing)].slice(0, 4).join(", ") });
+  const uniqueMissing = [...new Set(missing)];
+  if (uniqueMissing.length) {
+    warnings.push({ code: "term-missing", severity: "warn", detail: `Expected distinctive term(s) missing: ${uniqueMissing.slice(0, 4).join(", ")}`, sample: uniqueMissing.slice(0, 4).join(", ") });
   }
 
   // 3. English discourse words copied at the start of Swedish sentences.
@@ -107,11 +116,28 @@ export function lintTranslation(source, translation, { target = "en", glossary =
     warnings.push({ code: "repetition", severity: "error", detail: "Output appears to repeat itself — likely a model loop." });
   }
 
-  // 6. Check only straight double quotes. Curly/localized quote glyph usage
-  // varies across providers and chapters, so comparing their types creates too
-  // many false positives; single quotes/apostrophes are not dialogue delimiters.
-  const straightQuotes = (out.match(/\"/g) || []).length;
-  if (straightQuotes % 2) warnings.push({ code: "quotes", severity: "warn", detail: `Possible unmatched straight dialogue quote (${straightQuotes} marks).` });
+  // 6. Check paired dialogue delimiters. Curly apostrophes in words such as
+  // "don't" are punctuation, not dialogue quotes, and must not inflate counts.
+  const quotePairs = [["“", "”"], ["‘", "’"], ["«", "»"], ["「", "」"], ["『", "』"], ["\"", "\""]];
+  const unmatched = [];
+  for (const [open, close] of quotePairs) {
+    let depth = 0;
+    let strayClose = 0;
+    for (let i = 0; i < out.length; i++) {
+      const char = out[i];
+      // Ignore apostrophes embedded inside words and possessive endings.
+      const previousIsWord = /[A-Za-z0-9À-ÖØ-öø-ÿ]/.test(out[i - 1] || "");
+      const nextIsWord = /[A-Za-z0-9À-ÖØ-öø-ÿ]/.test(out[i + 1] || "");
+      if (open === "‘" && char === close && previousIsWord && (depth === 0 || nextIsWord)) continue;
+      if (open === "‘" && char === open && previousIsWord && nextIsWord) continue;
+      if (open === close && char === open) depth = depth ? 0 : 1;
+      else if (char === open) depth++;
+      else if (char === close && depth > 0) depth--;
+      else if (char === close) strayClose++;
+    }
+    if (depth || strayClose) unmatched.push(`${open}${close}: ${depth} open, ${strayClose} unmatched close`);
+  }
+  if (unmatched.length) warnings.push({ code: "quotes", severity: "warn", detail: `Unbalanced dialogue quotes (${unmatched.join("; ")}).` });
 
   // 7. Model commentary leaking into the output.
   if (/\b(here is the translation|as an ai|i cannot translate|note:)\b/i.test(out)) {

@@ -19,7 +19,7 @@ import {
 import { normalizeDifficulty } from "./qa.js";
 import {
   listProfiles, createProfile, loginProfile, logoutProfile, authProfile, requireProfile,
-  updateProfile, deleteProfile, getState, patchState,
+  updateProfile, deleteProfile, getState, patchState, saveProfileAvatar, getProfileAvatar,
 } from "./profiles.js";
 import { PRIMARY, BACKUP, poolStatus, configuredProviders } from "./engines/models.js";
 
@@ -290,6 +290,21 @@ const server = createServer(async (req, res) => {
       if (seg.length === 4 && seg[3] === "login" && method === "POST") {
         const b = await readJson(req);
         return json(res, 200, await loginProfile(store, id, b.pin));
+      }
+      if (seg.length === 4 && seg[3] === "avatar" && method === "GET") {
+        const avatar = await getProfileAvatar(store, id);
+        if (!avatar) return json(res, 404, { error: "No profile picture uploaded." });
+        res.writeHead(200, { "Content-Type": avatar.contentType, "Content-Length": avatar.body.length, "Cache-Control": "public, max-age=3600" });
+        return res.end(avatar.body);
+      }
+      if (seg.length === 4 && seg[3] === "avatar" && method === "POST") {
+        await requireProfile(store, id, token);
+        const b = await readJson(req, 2_100_000);
+        const match = /^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/]*={0,2})$/.exec(String(b.dataUrl || ""));
+        if (!match) throw new Error("Choose a JPEG, PNG, WebP or GIF profile picture.");
+        const body = Buffer.from(match[2], "base64");
+        if (!body.length || body.length > 1_500_000) throw new Error("Profile pictures must be under 1.5 MB.");
+        return json(res, 200, { profile: await saveProfileAvatar(store, id, body, match[1]) });
       }
       if (seg.length === 4 && seg[3] === "state" && method === "GET") {
         await requireProfile(store, id, token);

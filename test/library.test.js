@@ -557,6 +557,30 @@ describe("QA lint", () => {
     const w = lintTranslation("キリトは剣を抜いた。", "KIRITO drew his sword!", { target: "en", glossary: [{ source: "キリト", target: "Kirito." }] });
     assert.equal(summarizeWarnings(w).ok, true);
   });
+  it("ignores common auto-suggested glossary words and deduplicates real missing terms", () => {
+    const warnings = lintTranslation("Sure, Like these words.", "Visst, ungefär så.", {
+      target: "sv",
+      glossary: [
+        { source: "Sure", target: "Sure" },
+        { source: "Like", target: "Like" },
+        { source: "These", target: "These" },
+        { source: "Kirito", target: "Kirito" },
+        { source: "キリト", target: "キリト" },
+      ],
+    });
+    assert.equal(warnings.some((warning) => warning.code === "term-missing"), false);
+
+    const actualMissing = lintTranslation("キリト appeared.", "A swordsman appeared.", {
+      target: "en", glossary: [{ source: "キリト", target: "Kirito" }],
+    }).find((warning) => warning.code === "term-missing");
+    assert.ok(actualMissing, "a missing distinctive translated name must remain visible");
+  });
+  it("flags quote mismatches, but ignores apostrophes and possessives", () => {
+    const valid = lintTranslation("source", "‘Don’t worry,’ Asuna said. Kirito’s sword gleamed.");
+    assert.equal(valid.some((warning) => warning.code === "quotes"), false);
+    const invalid = lintTranslation("source", "‘The door opened.”");
+    assert.ok(invalid.some((warning) => warning.code === "quotes"));
+  });
   it("flags English discourse starters in Swedish, not translated Swedish equivalents", () => {
     const warnings = lintTranslation("source", "Think på barn. Well, det fanns. Som vanligt.", { target: "sv" });
     const english = warnings.find((warning) => warning.code === "english-opener");
@@ -567,6 +591,15 @@ describe("QA lint", () => {
     assert.match(quoted.find((warning) => warning.code === "english-opener").sample, /Well/);
     assert.doesNotMatch(english.sample, /Som/);
     assert.equal(lintTranslation("source", "“Hon öppnade dörren.” Han gick in.", { target: "sv" }).some((warning) => warning.code === "quotes"), false);
+  });
+  it("re-translates all chunks when force is requested, even when memory is populated", async () => {
+    const first = makeTranslator();
+    const added = await ingestText(store, { title: "Force Translation Cache", sourceLang: "en", text: "First sentence.\n\nSecond sentence.", translate: first });
+    await translateChapter(store, { workId: added.workId, chapterId: added.chapterId, target: "sv", translate: first });
+    const forced = makeTranslator();
+    const result = await translateChapter(store, { workId: added.workId, chapterId: added.chapterId, target: "sv", force: true, translate: forced });
+    assert.equal(result.cached, false);
+    assert.ok(forced.calls.length > 0, "force must call the translator instead of serving cached chunks");
   });
   it("does not flag chapter quotes split across translation chunks", async () => {
     const translate = async (chunk) => ({ text: chunk, provider: "test", model: "test" });

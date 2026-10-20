@@ -28,7 +28,11 @@ export function verifyPin(pin, salt, hash) {
 }
 
 export function publicProfile(p) {
-  return { id: p.id, name: p.name, avatar: p.avatar, color: p.color, hasPin: !!p.hash, createdAt: p.createdAt, lastActive: p.lastActive || 0 };
+  return {
+    id: p.id, name: p.name, avatar: p.avatar, color: p.color,
+    avatarUrl: p.avatarKey ? `/api/profiles/${p.id}/avatar?v=${p.avatarVersion || 0}` : null,
+    hasPin: !!p.hash, createdAt: p.createdAt, lastActive: p.lastActive || 0,
+  };
 }
 
 export function pickAvatar(i) { return AVATARS[i % AVATARS.length]; }
@@ -122,6 +126,34 @@ export async function updateProfile(store, id, { name, avatar, color, pin } = {}
   return publicProfile(profile);
 }
 
+export async function saveProfileAvatar(store, id, buffer, contentType) {
+  const extensions = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
+  const ext = extensions[contentType];
+  if (!ext) throw new Error("Profile pictures must be JPEG, PNG, WebP or GIF.");
+  if (!Buffer.isBuffer(buffer) || !buffer.length || buffer.length > 1_500_000) throw new Error("Profile pictures must be under 1.5 MB.");
+  const db = await load(store);
+  const profile = db.profiles.find((p) => p.id === id);
+  if (!profile) throw new Error("Unknown profile.");
+  const previousKey = profile.avatarKey;
+  const avatarKey = `avatars/${id}.${ext}`;
+  await store.saveBuffer(avatarKey, buffer, contentType);
+  profile.avatarKey = avatarKey;
+  profile.avatarType = contentType;
+  profile.avatarVersion = Date.now();
+  await save(store, db);
+  await store.flush();
+  if (previousKey && previousKey !== avatarKey) await store.deleteFile(previousKey);
+  return publicProfile(profile);
+}
+
+export async function getProfileAvatar(store, id) {
+  const db = await load(store);
+  const profile = db.profiles.find((p) => p.id === id);
+  if (!profile?.avatarKey) return null;
+  const body = await store.loadBuffer(profile.avatarKey);
+  return body ? { body, contentType: profile.avatarType || "application/octet-stream" } : null;
+}
+
 export async function deleteProfile(store, id) {
   const db = await load(store);
   const i = db.profiles.findIndex((p) => p.id === id);
@@ -132,6 +164,7 @@ export async function deleteProfile(store, id) {
   await save(store, db);
   store.writeRaw(stateFile(id), { progress: {}, myList: [], look: null, deleted: Date.now() });
   await store.flush();
+  if (removed.avatarKey) await store.deleteFile(removed.avatarKey);
   return publicProfile(removed);
 }
 

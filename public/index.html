@@ -111,6 +111,8 @@
           <option value="parchment">Parchment</option><option value="solarized">Solarized</option><option value="rose">Rose</option>
           <option value="dark">Dark</option><option value="night">Night</option><option value="slate">Slate</option>
           <option value="forest">Forest</option><option value="ink">Ink</option>
+          <option value="ocean">Ocean</option><option value="midnight">Midnight</option><option value="contrast">High contrast</option>
+          <option value="custom">Custom colors</option>
         </select></label>
         <label>Font <select id="fontFamily">
           <option value="serif">Book serif</option>
@@ -133,6 +135,14 @@
         <label>Letter spacing <select id="letterSpacing">
           <option value="0">Normal</option><option value="0.01em">Slightly wide</option><option value="0.03em">Wide</option>
         </select></label>
+        <label>Paragraph spacing <select id="paragraphSpacing">
+          <option value="compact">Compact</option><option value="normal" selected>Comfortable</option><option value="relaxed">Relaxed</option>
+        </select></label>
+        <fieldset class="custom-colors" id="customColors"><legend>Custom palette</legend>
+          <label>Page <input id="customBg" type="color" value="#121214"></label>
+          <label>Text <input id="customInk" type="color" value="#eceaf0"></label>
+          <label>Accent <input id="customAccent" type="color" value="#e50914"></label>
+        </fieldset>
         <label class="chip"><input type="checkbox" id="justifyText"> Justify</label>
         <span class="spacer"></span>
         <span id="lookSaved" class="hint"></span>
