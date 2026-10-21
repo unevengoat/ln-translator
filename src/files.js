@@ -78,12 +78,34 @@ async function officeToText(buffer, ext) {
 /** .rtf — strip control words/groups into plain text. */
 function rtfToText(raw) {
   let s = String(raw);
+  // Embedded pictures are binary/hex payloads, not prose — drop the groups
+  // outright so hex dumps never leak into the novel text.
+  s = s.replace(/\{\\pict\b(?:[^{}]|\{[^{}]*\})*?\}/gi, "\n\n");
   s = s.replace(/\{\\fonttbl[\s\S]*?\}\}/g, "").replace(/\{\\colortbl[\s\S]*?\}/g, "").replace(/\{\\stylesheet[\s\S]*?\}\}/g, "");
   s = s.replace(/\\'([0-9a-f]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
   s = s.replace(/\\(par|line|sect|page)\b\s?/gi, "\n\n").replace(/\\tab\b\s?/gi, "\t");
   s = s.replace(/\\u(-?\d+)\s?\??/g, (_, d) => String.fromCodePoint(((Number(d) + 65536) % 65536)));
   s = s.replace(/\\[a-z]+(-?\d+)?\s?/gi, "").replace(/[{}]/g, "");
   return cleanNovelArtifacts(s.replace(/\r\n?/g, "\n").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim()) + "\n";
+}
+
+/** .rtf with illustrations: `\pict\pngblip|\jpegblip` groups carry hex payloads. */
+function rtfWithImages(raw) {
+  const images = [];
+  const s = String(raw).replace(/\{\\pict\b((?:[^{}]|\{[^{}]*\})*?)\}/gi, (group, inner) => {
+    const blip = /\\(pngblip|jpegblip)\b/i.exec(inner)?.[1]?.toLowerCase();
+    let id = null;
+    if (blip) {
+      const hex = inner.replace(/\\[a-z]+-?\d*\s?/gi, "").replace(/[^0-9a-fA-F]/g, "");
+      if (hex.length >= 32 && hex.length % 2 === 0) {
+        try {
+          id = collectImage(Buffer.from(hex, "hex"), blip === "pngblip" ? "image/png" : "image/jpeg", `rtf-image.${blip === "pngblip" ? "png" : "jpg"}`, images);
+        } catch { id = null; }
+      }
+    }
+    return id ? `\n\n${imageMarker(id)}\n\n` : "\n\n";
+  });
+  return { text: rtfToText(s), images };
 }
 
 /** .fb2 — FictionBook XML. */
@@ -335,6 +357,7 @@ export async function parseBufferWithImages(name, buffer) {
   if (ext === ".docx" || ext === ".odt") return officeWithImages(buffer, ext);
   if (ext === ".zip") return zipWithImages(buffer, name);
   if (ext === ".fb2") return fb2WithImages(buffer.toString("utf8"));
+  if (ext === ".rtf") return rtfWithImages(buffer.toString("utf8"));
   if (ext === ".html" || ext === ".htm") return htmlWithImages(buffer.toString("utf8"));
   return { text: await parseBuffer(name, buffer), images: [] };
 }

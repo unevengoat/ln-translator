@@ -8,7 +8,7 @@ import { inflateSync } from "node:zlib";
 import JSZip from "jszip";
 import { Store, LocalBackend } from "../src/store.js";
 import {
-  parseBufferWithImages, extractImageIds, encodePng, imageMarker,
+  parseBufferWithImages, parseBuffer, extractImageIds, encodePng, imageMarker,
 } from "../src/files.js";
 import { ingestText, getChapter, getWork, translateChapter, saveStoryImages } from "../src/library.js";
 
@@ -211,6 +211,78 @@ describe("parseBufferWithImages: PDF text + illustrations", () => {
     const a = await parseBufferWithImages("vol.pdf", one);
     const b = await parseBufferWithImages("vol.pdf", Buffer.from(one));
     assert.equal(a.images[0].id, b.images[0].id);
+  });
+});
+
+describe("every upload format parses (with images where the format supports them)", () => {
+  const tinyPngB64 = () => pngOf().toString("base64");
+  const expectPng = (im) => {
+    assert.equal(im.contentType, "image/png");
+    assert.deepEqual([...im.data.subarray(0, 4)], [137, 80, 78, 71]);
+  };
+  it("txt and markdown come through as plain text", async () => {
+    for (const [name, raw] of [["n.txt", "First.\n\nSecond."], ["n.md", "# Title\n\nBody *emph*.\n"]]) {
+      const r = await parseBufferWithImages(name, Buffer.from(raw));
+      assert.ok(r.text.includes("First") || r.text.includes("Body"), `${name}: prose kept`);
+      assert.equal(r.images.length, 0, `${name}: no images possible`);
+    }
+  });
+  it("rtf extracts pngblip and jpegblip pictures in order and skips broken ones", async () => {
+    const hex = pngOf().toString("hex");
+    const jpeg = Buffer.alloc(32, 7); jpeg[0] = 0xff; jpeg[1] = 0xd8;
+    const raw = `{\\rtf1\\ansi{\\fonttbl{\\f0 Arial;}}\\f0\\fs24 Before.\\par{\\pict\\pngblip\\picw64\\pich64 ${hex}}\\par Middle.\\par{\\pict\\jpegblip\\picw32\\pich32 ${jpeg.toString("hex")}}\\par{\\pict\\pngblip\\picw10 NOT-HEX!!}\\par After.\\par}`;
+    const r = await parseBufferWithImages("n.rtf", Buffer.from(raw));
+    assert.equal(r.images.length, 2, "both valid pictures extracted, broken one skipped");
+    expectPng(r.images[0]);
+    assert.equal(r.images[1].contentType, "image/jpeg");
+    assert.deepEqual(paras(r.text), ["Before.", imageMarker(r.images[0].id), "Middle.", imageMarker(r.images[1].id), "After."]);
+    // The text-only path must not leak hex dumps into the novel.
+    const plain = await parseBuffer("n.rtf", Buffer.from(raw));
+    assert.ok(!/[0-9a-f]{32,}/i.test(plain.replace(/\[\[img:[0-9a-f]{12}\]\]/g, "")), "no hex dump in text");
+    assert.ok(plain.includes("Before.") && plain.includes("After."));
+  });
+  it("zip bundles parse every member, images included", async () => {
+    const zip = new JSZip();
+    zip.file("ch1.txt", "Chapter one text.");
+    zip.file("ch2.html", `<p>Chapter two text.</p><img src="data:image/png;base64,${tinyPngB64()}">`);
+    const r = await parseBufferWithImages("bundle.zip", await zip.generateAsync({ type: "nodebuffer" }));
+    assert.ok(r.text.includes("Chapter one text.") && r.text.includes("Chapter two text."));
+    assert.equal(r.images.length, 1);
+    expectPng(r.images[0]);
+    assert.ok(r.text.includes(imageMarker(r.images[0].id)));
+  });
+  it("office, ebook and pdf formats keep their illustrations in reading order", async () => {
+    // docx
+    const dzip = new JSZip();
+    dzip.file("word/document.xml", `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>A.</w:t></w:r></w:p><w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:blipFill><a:blip r:embed="rId2"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p><w:p><w:r><w:t>B.</w:t></w:r></w:p></w:body></w:document>`);
+    dzip.file("word/_rels/document.xml.rels", `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId2" Type="x" Target="media/p.png"/></Relationships>`);
+    dzip.file("word/media/p.png", pngOf());
+    // odt
+    const ozip = new JSZip();
+    ozip.file("content.xml", `<?xml version="1.0"?><office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:xlink="http://www.w3.org/1999/xlink"><office:body><office:text><text:p>C.</text:p><text:p><draw:frame><draw:image xlink:href="Pictures/p.png"/></draw:frame></text:p><text:p>D.</text:p></office:text></office:body></office:document-content>`);
+    ozip.file("Pictures/p.png", pngOf());
+    // epub
+    const ezip = new JSZip();
+    ezip.file("OEBPS/content.opf", `<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="c" href="c.xhtml" media-type="application/xhtml+xml"/><item id="p" href="p.png" media-type="image/png"/></manifest><spine><itemref idref="c"/></spine></package>`);
+    ezip.file("OEBPS/c.xhtml", `<html xmlns="http://www.w3.org/1999/xhtml"><body><p>E.</p><p><img src="p.png"/></p><p>F.</p></body></html>`);
+    ezip.file("OEBPS/p.png", pngOf());
+    // fb2
+    const fb2 = `<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0" xmlns:xlink="http://www.w3.org/1999/xlink"><body><section><p>G.</p><image xlink:href="#p"/><p>H.</p></section></body><binary id="p" content-type="image/png">${tinyPngB64()}</binary></FictionBook>`;
+    const cases = [
+      ["n.docx", await dzip.generateAsync({ type: "nodebuffer" }), ["A.", "B."]],
+      ["n.odt", await ozip.generateAsync({ type: "nodebuffer" }), ["C.", "D."]],
+      ["n.epub", await ezip.generateAsync({ type: "nodebuffer" }), ["E.", "F."]],
+      ["n.fb2", Buffer.from(fb2), ["G.", "H."]],
+      ["n.pdf", buildPdfWithImage(), ["Hello chapter one", "Hello chapter two"]],
+      ["n.html", Buffer.from(`<p>I.</p><img src="data:image/png;base64,${tinyPngB64()}"><p>J.</p>`), ["I.", "J."]],
+    ];
+    for (const [name, buf, prose] of cases) {
+      const r = await parseBufferWithImages(name, buf);
+      for (const p of prose) assert.ok(r.text.includes(p), `${name}: keeps "${p}"`);
+      assert.ok(r.images.length >= 1, `${name}: illustration extracted`);
+      expectPng(r.images[0]);
+      assert.ok(r.text.includes(imageMarker(r.images[0].id)), `${name}: marker in reading order`);
+    }
   });
 });
 

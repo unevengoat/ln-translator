@@ -818,7 +818,7 @@ $("uploadFile").onchange = async () => {
   busy($("uploadFile"), true, "Reading…");
   pendingImages = [];
   try {
-    if (/\.(epub|html?|pdf|docx|rtf|fb2|zip)$/i.test(f.name)) {
+    if (/\.(epub|html?|pdf|docx|odt|rtf|fb2|zip)$/i.test(f.name)) {
       const buf = await f.arrayBuffer();
       let bin = ""; const bytes = new Uint8Array(buf);
       for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode(...bytes.subarray(i, i + 8192));

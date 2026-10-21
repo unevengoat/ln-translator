@@ -463,7 +463,7 @@ const server = createServer(async (req, res) => {
         const b = await readJson(req);
         const targets = b.targets?.length ? b.targets.map(normalizeCode) : [normalizeCode(b.target || "en")];
         const levels = (b.difficulties?.length ? b.difficulties : [b.difficulty || DEFAULT_DIFFICULTY]).map(normalizeDifficulty);
-        const job = startTranslateJob(workId, targets, { force: !!b.force, difficulties: levels, ensure: b.ensure !== false, maxPasses: 1 });
+        const job = startTranslateJob(workId, targets, { force: !!b.force, difficulties: levels, ensure: b.ensure !== false });
         return json(res, 200, { jobId: job.id, workId, targets, difficulties: levels });
       }
 
