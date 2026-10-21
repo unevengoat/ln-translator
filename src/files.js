@@ -1,9 +1,11 @@
 // File I/O: .txt / .md / .html natively, .epub via jszip (optional dep).
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { cleanNovelArtifacts } from "./qa.js";
 
 export const SUPPORTED_IN = [".txt", ".md", ".markdown", ".html", ".htm", ".epub", ".pdf", ".docx", ".odt", ".rtf", ".fb2", ".zip"];
 export const SUPPORTED_OUT = [".txt", ".md", ".html"];
+
 
 function htmlToText(html) {
   return String(html)
@@ -32,14 +34,14 @@ export async function readInput(filePath) {
 export async function parseBuffer(name, buffer) {
   const ext = path.extname(name).toLowerCase();
   if (ext === ".epub") return epubToText(buffer);
-  if (ext === ".pdf") return pdfToText(buffer);
+  if (ext === ".pdf") return cleanNovelArtifacts(await pdfToText(buffer)).trim() + "\n";
   if (ext === ".docx" || ext === ".odt") return officeToText(buffer, ext);
   if (ext === ".zip") return zipToText(buffer, name);
   const raw = buffer.toString("utf8");
-  if (ext === ".rtf") return rtfToText(raw);
-  if (ext === ".fb2") return fb2ToText(raw);
-  if (ext === ".html" || ext === ".htm") return htmlToText(raw);
-  return raw.replace(/\r\n?/g, "\n").trim() + "\n";
+  if (ext === ".rtf") return cleanNovelArtifacts(rtfToText(raw)).trim() + "\n";
+  if (ext === ".fb2") return cleanNovelArtifacts(fb2ToText(raw)).trim() + "\n";
+  if (ext === ".html" || ext === ".htm") return cleanNovelArtifacts(htmlToText(raw)).trim() + "\n";
+  return cleanNovelArtifacts(raw.replace(/\r\n?/g, "\n").trim()) + "\n";
 }
 
 const decodeEntities = (s) =>
@@ -68,7 +70,7 @@ async function officeToText(buffer, ext) {
     .replace(/<text:line-break[^>]*\/>/g, "\n")
     .replace(/<\/text:h>/g, "\n\n")
     .replace(/<[^>]+>/g, "");
-  return decodeEntities(xml).replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim() + "\n";
+  return cleanNovelArtifacts(decodeEntities(xml).replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim()) + "\n";
 }
 
 /** .rtf — strip control words/groups into plain text. */
@@ -79,7 +81,7 @@ function rtfToText(raw) {
   s = s.replace(/\\(par|line|sect|page)\b\s?/gi, "\n\n").replace(/\\tab\b\s?/gi, "\t");
   s = s.replace(/\\u(-?\d+)\s?\??/g, (_, d) => String.fromCodePoint(((Number(d) + 65536) % 65536)));
   s = s.replace(/\\[a-z]+(-?\d+)?\s?/gi, "").replace(/[{}]/g, "");
-  return s.replace(/\r\n?/g, "\n").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim() + "\n";
+  return cleanNovelArtifacts(s.replace(/\r\n?/g, "\n").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim()) + "\n";
 }
 
 /** .fb2 — FictionBook XML. */
@@ -93,7 +95,7 @@ function fb2ToText(raw) {
     .replace(/<\/p>/gi, "\n\n")
     .replace(/<p[^>]*>/gi, "")
     .replace(/<[^>]+>/g, "");
-  return decodeEntities(s).replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim() + "\n";
+  return cleanNovelArtifacts(decodeEntities(s).replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim()) + "\n";
 }
 
 /** .zip — a bundle of chapters/files: parse each entry and keep them in order. */
@@ -204,7 +206,7 @@ async function pdfToText(buf) {
     out.push("\n\n"); // page boundary = paragraph boundary
   }
 
-  return htmlToText(out.join("").replace(/\n{3,}/g, "\n\n")).trim() + "\n";
+  return cleanNovelArtifacts(htmlToText(out.join("").replace(/\n{3,}/g, "\n\n")).trim()) + "\n";
 }
 
 async function epubToText(buf) {
@@ -235,7 +237,7 @@ async function epubToText(buf) {
     if (!f) continue;
     texts.push(htmlToText(await f.async("string")));
   }
-  return texts.filter(Boolean).join("\n\n") + "\n";
+  return cleanNovelArtifacts(texts.filter(Boolean).join("\n\n")) + "\n";
 }
 
 export function outputPath(inputPath, targetCode) {

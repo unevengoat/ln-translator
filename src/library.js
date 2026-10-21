@@ -10,7 +10,7 @@ import {
   termsGlossary, mergeTerms, extractTermsWithModel, latinCandidates, termForms,
   termCounts, termsToCsv, parseCsv, parseGlossary, cleanNoisyTerms,
 } from "./terms.js";
-import { lintTranslation, summarizeWarnings, cleanTranslationArtifacts, normalizeDifficulty, DEFAULT_DIFFICULTY, DIFFICULTIES } from "./qa.js";
+import { lintTranslation, dedupeWarnings, summarizeWarnings, cleanNovelArtifacts, cleanTranslationArtifacts, normalizeDifficulty, DEFAULT_DIFFICULTY, DIFFICULTIES } from "./qa.js";
 
 // Chunk size is part of the translation-memory key: changing it invalidates the
 // whole cache, so keep this stable.
@@ -484,7 +484,10 @@ export async function translateChapter(store, {
   const allGlossary = termsGlossary(terms, target);
   // Only the terms that actually occur in a chunk go into its prompt, so a big
   // story's glossary never bloats (or confuses) the model.
-  const glossaryFor = (chunkText) => allGlossary.filter((g) => chunkText.includes(g.source));
+  // Identity rows (source === target) only tell the model to keep English in
+  // the output — skip them in the prompt so Swedish actually gets translated.
+  // Real name-keeping still happens naturally; lint also ignores identity.
+  const glossaryFor = (chunkText) => allGlossary.filter((g) => g.source.toLocaleLowerCase() !== g.target.toLocaleLowerCase() && chunkText.includes(g.source));
   const tm = await store.loadTm(workId, target, level);
   const text = await store.loadText(chapter.sourceHash);
   const chunks = chunkNovel(normalizeText(text), MAX_CHUNK);
@@ -562,13 +565,14 @@ export async function translateChapter(store, {
   }
 
   const translation = results.filter((v) => v !== undefined).join("\n\n");
+  const uniqueWarnings = dedupeWarnings(warnings);
   const hash = await store.saveText(translation);
   const tkey = `${workId}|${chapterId}|${target}|${level}`;
   await store.update((db) => {
     const w = db.works[workId];
     db.translations[tkey] = {
       key: tkey, workId, chapterId, target, difficulty: level, hash, chunks: chunks.length, at: Date.now(),
-      provider, warnings, qa: summarizeWarnings(warnings),
+      provider, warnings: uniqueWarnings, qa: summarizeWarnings(uniqueWarnings),
     };
     if (w) {
       w.languages = [...new Set([...w.languages, target])];
@@ -579,7 +583,7 @@ export async function translateChapter(store, {
     logActivity(db, { type: "translated", workId, chapterId, lang: target, detail: `${chapter.title} → ${target} (${level})` });
   });
   await store.flush();
-  return { translation, chunks: chunks.length, cached: todo.length === 0, provider, difficulty: level, warnings, qa: summarizeWarnings(warnings) };
+  return { translation, chunks: chunks.length, cached: todo.length === 0, provider, difficulty: level, warnings: uniqueWarnings, qa: summarizeWarnings(uniqueWarnings) };
 }
 
 /** Translate chapters into one or more languages × reading levels (job-friendly). */
@@ -671,8 +675,17 @@ export async function getChapter(store, { workId, chapterId, lang = "", difficul
   if (!work) return null;
   const chapter = work.chapters.find((c) => c.id === chapterId || String(c.index) === String(chapterId));
   if (!chapter) return null;
-  const original = await store.loadText(chapter.sourceHash).catch(() => "");
+  const storedOriginal = await store.loadText(chapter.sourceHash).catch(() => "");
+  const original = cleanNovelArtifacts(storedOriginal);
   const recs = Object.values(db.translations).filter((t) => t.chapterId === chapter.id);
+  const glossary = lang ? termsGlossary(await store.loadTerms(workId), lang) : [];
+  const getWarnings = (text, savedWarnings = []) => {
+    if (text == null) return [];
+    // Re-lint saved outputs on read so legacy false positives don't keep
+    // resurfacing in the reader after the QA rules have been corrected.
+    const current = lintTranslation(original, text, { target: lang, glossary });
+    return dedupeWarnings(current.length ? current : savedWarnings.filter((warning) => warning.code === "empty"));
+  };
   const available = recs.map((t) => ({ lang: t.target, difficulty: t.difficulty || "medium" }));
   let translation = null;
   let record = null;
@@ -682,10 +695,12 @@ export async function getChapter(store, { workId, chapterId, lang = "", difficul
     const exact = db.translations[`${workId}|${chapter.id}|${lang}|${level}`];
     const fallback = exact || recs.find((t) => t.target === lang);
     if (fallback) {
-      translation = await store.loadText(fallback.hash).catch(() => null);
+      const storedTranslation = await store.loadText(fallback.hash).catch(() => null);
+      translation = storedTranslation == null ? null : cleanTranslationArtifacts(storedTranslation, lang);
+      const warnings = getWarnings(translation, fallback.warnings || []);
       record = {
-        provider: fallback.provider, at: fallback.at, warnings: fallback.warnings || [],
-        qa: fallback.qa, difficulty: fallback.difficulty || "medium", exact: !!exact,
+        provider: fallback.provider, at: fallback.at, warnings,
+        qa: summarizeWarnings(warnings), difficulty: fallback.difficulty || "medium", exact: !!exact,
       };
     }
   }

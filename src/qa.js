@@ -18,13 +18,92 @@ export function normalizeDifficulty(d) {
   return DIFFICULTIES.includes(v) ? v : "medium";
 }
 
+const TRANSLATION_META_LINES = [
+  /(?:^|\s)we need to (?:translate|preserve|copy)\b/i,
+  /(?:^|\s)we must (?:translate|preserve|keep|leave|not change|not translate)\b/i,
+  /(?:^|\s)follow(?: these)? rules\b/i,
+  /(?:^|\s)need to ensure\b.*(?:translation|glossary|paragraph|line break|untranslated)/i,
+  /(?:^|\s)let's? (?:copy|translate|preserve|keep|break it|make sure|rewrite) each paragraph\b/i,
+  /(?:^|\s)(?:now|here|below) (?:translate|we can translate|the translation|write)\b/i,
+  /(?:^|\s)translate(?: the following| this passage| the passage(?: below)?)\b/i,
+  /(?:^|\s)(?:here's?| here is|below is) (?:the )?translation\b/i,
+  /(?:^|\s)paragraph\s+\d+\s*:/i,
+  /(?:^|\s)(?:original text|swedish|translation)\s*:/i,
+  /(?:^|\s)(?:this text is in english|the user (?:asked|wants))\b/i,
+  /(?:^|\s)we should (?:translate|preserve|keep)\b/i,
+  /(?:^|\s)(?:preserve|keep) (?:the )?(?:paragraph|line) breaks\b/i,
+  /(?:^|\s)output only the translation\b/i,
+  /(?:^|\s)keep(?:ing)? (?:the )?(?:glossary terms|paragraph breaks|line breaks|quotes?|honorifics?|names?|target-language quotation marks|lowercase|upper(?:case)?|original)\b/i,
+  /(?:^|\s)keep as is\b/i,
+  /(?:^|\s)keep \"[^\"]*\" as is\b/i,
+  /(?:^|\s)(?:first|next|last) (?:paragraph|line)\s*:/i,
+  /(?:^|\s)let's? (?:translate|rewrite) each paragraph\b/i,
+  /(?:^|\s)(?:preserve|keep) (?:the )?(?:same|exact) (?:line|paragraph) breaks\b/i,
+  /(?:^|\s)(?:we need to|we have to) translate to\b/i,
+  /(?:^|\s)now (?:write|translate) (?:the )?translation\b/i,
+  /(?:^|\s)(?:the following (?:is|text) (?:the )?translation|should we translate)\b/i,
+  /(?:^|\s)(?:it's?|it'?s) likely a page header\b/i,
+  /(?:^|\s)glossary includes specific terms\b/i,
+  /(?:^|\s)keep lower case\b/i,
+  /(?:^|\s)keep upper(?:case)?\b/i,
+  /translate:.*?keep/i,
+  /(?:^|\s)we'll(?:l)? (?:keep|translate)\b.*(?:as is|glossary|translation|untranslated|paragraph)/i,
+  /(?:^|\s)we need to keep\b.*(?:as is|glossary|translation|untranslated|paragraph)/i,
+  /(?:^|\s)the rule(?:s)?\s*:/i,
+  /note:\s/i,
+  /(?:^|\s)should we keep\b/i,
+  /(?:^|\s)let's? copy each line and translate\b/i,
+  /(?:^|\s)let's? copy each paragraph\b/i,
+  /(?:^|\s)(?:note|question):\s/i,
+  /(?:^|\s)(?:probably|maybe) translate\b/i,
+  /(?:^|\s)(?:should|do we|would we) translate\b/i,
+  /(?:^|\s)(?:keep|leave|not change|not translate) \"[^\"]*\"/i,
+  /(?:^|\s)(?:if|when) \"[^\"]*\" (?:keep|leave|translate)/i,
+  /(?:^|\s)(?:it'?s|it is) (?:likely|a|probably) (?:page|formatting|glossary|translation) (?:header|error|issue|artifact)/i,
+  /(?:^|\s)(?:so|then) keep(?:ing)? (?:as is|the )/i,
+  /(?:^|\s)(?:thus|i will|i'll) (?:keep|translate|leave)\b.*(?:as is|glossary|translation|untranslated|paragraph)/i,
+];
+
+/** Remove obvious page headers and leaked translation instructions from novel text. */
+export function cleanNovelArtifacts(text) {
+  const sanitized = String(text ?? "")
+    .replace(/\r\n?/g, "\n")
+    // Remove these labels whether they are standalone or glued to prose; the
+    // capture retains adjacent content while normalizing the page boundary.
+    .replace(/\n[ \t]*Page\s*\d+\s*Goldenagato\s*\|?[ \t]*(?=\n|$)/gi, "")
+    .replace(/\n[ \t]*Page\s*\d+\s*[\w.-]+\.(?:com|net|org|io|me|co|ru|xyz|to)\s*\|?[ \t]*(?=\n|$)/gi, "")
+    .replace(/^[ \t]*Page\s*\d+\s*Goldenagato\s*\|?[ \t]*(?=\n|$)/gim, "")
+    .replace(/^[ \t]*Page\s*\d+\s*[\w.-]+\.(?:com|net|org|io|me|co|ru|xyz|to)\s*\|?[ \t]*(?=\n|$)/gim, "")
+    .replace(/Page\s*\d+\s*Goldenagato\s*\|?/gi, " ")
+    .replace(/Page\s*\d+\s*[\w.-]+\.(?:com|net|org|io|me|co|ru|xyz|to)\s*\|?/gi, " ")
+    .replace(/^[ \t]*Page\s+\d+\s*$/gim, "")
+    .replace(/^[ \t]*(?:Sida|Seite|Página|Pagina|Page)\s+\d+\s*$/gim, "")
+    .replace(/\bPage\s*\d+\s*(?:Goldenagato|[\w.-]+\.(?:com|net|org|io|me|co|ru|xyz|to))\s*\|?/gi, " ")
+    .replace(/\bSida\s*\d+\s*Goldenagato\s*\|?/gi, " ")
+    .replace(/^(?:Page|Sida)\s*\d+Goldenagato\s*\|?[ \t]*$/gim, "")
+    .replace(/^(?:Page|Sida)\s*\d+\s*[\w.-]+\.(?:com|net|org|io|me|co|ru|xyz|to)\s*\|?[ \t]*$/gim, "")
+    .replace(/^(?:Page|Sida)\s*\d+\s+Goldenagato\s*\|?\s*$/gim, "")
+    .split(/\n{2,}/);
+  return sanitized
+    .filter((paragraph) => {
+      const trimmed = paragraph.trim();
+      if (!trimmed) return false;
+      return !TRANSLATION_META_LINES.some((pattern) => pattern.test(trimmed));
+    })
+    .join("\n\n")
+    .replace(/\s*\n{3,}\s*/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 /**
  * Mechanical clean-up of leftover source artefacts in a non-CJK target:
  * CJK quote brackets → target quotes, and stray kana/hangul (particles like と)
  * removed. This runs after the model, and the lint below then re-checks.
  */
 export function cleanTranslationArtifacts(text, target = "en") {
-  let out = String(text ?? "");
+  let out = cleanNovelArtifacts(text);
   if (CJK_TARGETS.has(target)) return out;
   out = out
     .replace(/「/g, "\u201c").replace(/」/g, "\u201d")
@@ -40,6 +119,33 @@ export function cleanTranslationArtifacts(text, target = "en") {
   // Broken quote at line starts ("and Asuna whispered" after a Japanese 「」と).
   out = out.replace(/([?!.\u2026])\s*"\s*and ([A-Z][a-z]+(?: [A-Z][a-z]+)?) (whispered|said|asked|shouted|replied|murmured|cried|laughed|sighed|nodded)/g, '$1" $2 $3');
   return out.trim();
+}
+
+function isWordChar(ch) { return !!ch && /[\p{L}\p{N}]/u.test(ch); }
+function termOccurs(text, term) {
+  const chars = [...String(text || "").toLocaleLowerCase()];
+  const needle = [...String(term || "").toLocaleLowerCase()];
+  if (!needle.length) return false;
+  // CJK scripts do not separate words with spaces; exact substring matching is
+  // appropriate there, while Latin words need boundaries to avoid e.g. chi/chil.
+  if (needle.some((ch) => /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/u.test(ch))) {
+    return String(text || "").toLocaleLowerCase().includes(String(term || "").toLocaleLowerCase());
+  }
+  for (let i = 0; i <= chars.length - needle.length; i++) {
+    if (!needle.every((ch, j) => chars[i + j] === ch)) continue;
+    if (!isWordChar(needle[0]) || (!isWordChar(chars[i - 1]) && !isWordChar(chars[i + needle.length]))) return true;
+  }
+  return false;
+}
+
+export function dedupeWarnings(warnings = []) {
+  const seen = new Set();
+  return warnings.filter((warning) => {
+    const key = `${warning.code || ""}|${warning.severity || ""}|${warning.detail || ""}|${warning.sample || ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 export function lintTranslation(source, translation, { target = "en", glossary = [] } = {}) {
@@ -66,12 +172,24 @@ export function lintTranslation(source, translation, { target = "en", glossary =
   }
 
   // 2. Glossary terms that appear in the source but not in the output.
-  const missing = [];
+  const missing = new Set();
   for (const g of glossary || []) {
-    if (g.source && g.target && src.includes(g.source) && !out.includes(g.target)) missing.push(`${g.source}→${g.target}`);
+    if (!g.source || !g.target) continue;
+    const sourceTerm = String(g.source).trim();
+    const targetTerm = String(g.target).trim();
+    if (!sourceTerm || !targetTerm) continue;
+    const sourceNormalized = sourceTerm.toLocaleLowerCase();
+    const targetNormalized = targetTerm.toLocaleLowerCase();
+    // Identity mappings for ordinary Latin words (e.g. Sure→Sure) are not
+    // useful glossary constraints and otherwise produce case-only false alarms.
+    if (sourceNormalized === targetNormalized) continue;
+    if (termOccurs(src, sourceTerm) && !termOccurs(out, targetTerm)) {
+      missing.add(`${sourceTerm}→${targetTerm}`);
+    }
   }
-  if (missing.length) {
-    warnings.push({ code: "term-missing", severity: "warn", detail: `Expected term(s) missing from output: ${missing.slice(0, 6).join(", ")}`, sample: missing.slice(0, 6).join(", ") });
+  if (missing.size) {
+    const terms = [...missing];
+    warnings.push({ code: "term-missing", severity: "warn", detail: `Expected term(s) missing from output: ${terms.slice(0, 6).join(", ")}`, sample: terms.slice(0, 6).join(", ") });
   }
 
   // 3. Suspiciously short output (dropped content).
@@ -87,9 +205,15 @@ export function lintTranslation(source, translation, { target = "en", glossary =
 
   // 5. Unbalanced quotes (formatting damage).
   const pairs = [['"', '"'], ["\u201c", "\u201d"], ["\u00ab", "\u00bb"], ["\u300c", "\u300d"], ["\u2018", "\u2019"]];
+  const quoteCount = (mark) => [...out].reduce((count, ch, i, chars) => {
+    if (ch !== mark) return count;
+    // U+2019 is also a typographic apostrophe in contractions/possessives.
+    if (mark === "’" && isWordChar(chars[i - 1]) && isWordChar(chars[i + 1])) return count;
+    return count + 1;
+  }, 0);
   for (const [open, close] of pairs) {
-    const a = (out.match(new RegExp(open.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) || []).length;
-    const b = (out.match(new RegExp(close.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) || []).length;
+    const a = quoteCount(open);
+    const b = quoteCount(close);
     if (open !== close && a !== b) warnings.push({ code: "quotes", severity: "warn", detail: `Unbalanced ${open}${close} quotes (${a} vs ${b}).` });
   }
 
@@ -98,11 +222,12 @@ export function lintTranslation(source, translation, { target = "en", glossary =
     warnings.push({ code: "commentary", severity: "warn", detail: "Output contains translator commentary instead of only the translation." });
   }
 
-  return warnings;
+  return dedupeWarnings(warnings);
 }
 
 export function summarizeWarnings(warnings) {
-  const errors = (warnings || []).filter((w) => w.severity === "error").length;
-  const warns = (warnings || []).filter((w) => w.severity === "warn").length;
+  const unique = dedupeWarnings(warnings || []);
+  const errors = unique.filter((w) => w.severity === "error").length;
+  const warns = unique.filter((w) => w.severity === "warn").length;
   return { errors, warns, ok: errors === 0 };
 }

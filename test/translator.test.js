@@ -55,6 +55,8 @@ describe("prompt", () => {
     assert.match(sys, /cold tone/);
     assert.match(sys, /READING LEVEL — EASY/);
     assert.match(sys, /IDENTICAL at every reading level/);
+    assert.match(sys, /no discussion of these instructions/);
+    assert.match(sys, /Remove obvious scraped page headers/);
     assert.match(sys, /NEVER leave any source-script character/);
     const hard = buildSystemPrompt({ sourceName: "Japanese", targetName: "German", difficulty: "hard" });
     assert.match(hard, /READING LEVEL — HARD/);

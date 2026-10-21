@@ -438,10 +438,11 @@ async function loadChapter() {
     : `${vol}Not translated to ${esc(langName(currentLang))} at ${esc(LEVEL_LABEL[currentLevel])} yet.`;
   const warn = ch.record?.warnings || [];
   $("warnBox").classList.toggle("hidden", !warn.length);
-  $("warnBox").innerHTML = warn.length
-    ? `<strong>QA warnings:</strong><ul>${warn.map((w) => `<li>${esc(w.detail)}${w.sample ? ` <code>${esc(w.sample)}</code>` : ""}</li>`).join("")}</ul><button id="retranslateBtn" class="ghost" type="button">Re-translate (force)</button>`
+  const visibleWarnings = [...new Map(warn.map((w) => [`${w.code || ""}|${w.detail || ""}`, w])).values()];
+  $("warnBox").classList.toggle("hidden", !visibleWarnings.length);
+  $("warnBox").innerHTML = visibleWarnings.length
+    ? `<strong>QA warnings:</strong><ul>${visibleWarnings.map((w) => `<li>${esc(w.detail)}${w.sample && !w.detail?.includes(w.sample) ? ` <code>${esc(w.sample)}</code>` : ""}</li>`).join("")}</ul>`
     : "";
-  $("retranslateBtn")?.addEventListener("click", () => doTranslate(true));
   renderReader(ch.translation, ch.original, ch.lang);
   if (ch.translation || ch.original) setProgress(currentWork.id, currentChapter, currentLang, currentLevel, `${currentWork.title} · ${ch.chapter.title}`, 8);
 }

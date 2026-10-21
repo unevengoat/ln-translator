@@ -18,7 +18,7 @@ import {
   deleteChapter, deleteWork, restoreVersion, suggestTerms, importGlossary, exportGlossary, parseTermInput, cleanExistingFrontMatter,
 } from "../src/library.js";
 import { mergeTerms, termsGlossary, canonicalFor, extractCandidates, termsToCsv, termCounts, latinCandidates, cleanNoisyTerms } from "../src/terms.js";
-import { lintTranslation, summarizeWarnings, normalizeDifficulty, cleanTranslationArtifacts, DIFFICULTIES } from "../src/qa.js";
+import { lintTranslation, dedupeWarnings, summarizeWarnings, normalizeDifficulty, cleanTranslationArtifacts, DIFFICULTIES } from "../src/qa.js";
 import { isModelGone, pickCandidates, translateWithPolicy } from "../src/engines/models.js";
 
 let dir, store;
@@ -230,6 +230,22 @@ describe("reading levels (difficulty)", () => {
     assert.equal(easyAgain.cached, true);
   });
 
+  it("cleans imported page headers and translation debris from existing reader text without mutating stored content", async () => {
+    const source = "The story begins.\n\nPage 1Goldenagato |\n\nThe next paragraph.";
+    const work = await ingestText(store, { title: "Reader cleanup", sourceLang: "en", text: source });
+    const translationHash = await store.saveText("Translated opening.\n\nPage 2Goldenagato |\n\nThis is the actual translated prose.");
+    await store.update((db) => {
+      db.translations[`${work.workId}|${work.chapterId}|sv|medium`] = {
+        key: `${work.workId}|${work.chapterId}|sv|medium`, workId: work.workId, chapterId: work.chapterId,
+        target: "sv", difficulty: "medium", hash: translationHash, warnings: [],
+      };
+    });
+    const chapter = await getChapter(store, { workId: work.workId, chapterId: work.chapterId, lang: "sv" });
+    assert.equal(chapter.original, "The story begins.\n\nThe next paragraph.");
+    assert.equal(chapter.translation, "Translated opening.\n\nThis is the actual translated prose.");
+    assert.equal(await store.loadText(translationHash), "Translated opening.\n\nPage 2Goldenagato |\n\nThis is the actual translated prose.");
+  });
+
   it("reads a chapter at a specific level, falling back to another level", async () => {
     const t = async (chunk, o) => ({ text: `[${o.target}/${o.difficulty}]`, provider: "groq", model: "m" });
     const a = await ingestText(store, { title: "Level Read", sourceLang: "ja", text: "本文です。", translate: t });
@@ -240,6 +256,43 @@ describe("reading levels (difficulty)", () => {
     assert.equal(fallback.record.exact, false);
     assert.equal(fallback.record.difficulty, "medium");
     assert.ok(fallback.translation);
+  });
+
+  it("re-lints saved translations so legacy false positives vanish but real warnings remain", async () => {
+    const source = "Sure, let me think. These words are like-like. It’s the author’s book.";
+    const clean = await ingestText(store, { title: "Legacy QA clean", sourceLang: "en", text: source });
+    const terms = await store.loadTerms(clean.workId);
+    mergeTerms(terms, "en", ["Sure", "Let", "Like", "These", "Think", "Well", "chi"].map((word) => ({ source: word, translation: word })));
+    store.saveTerms(clean.workId, terms);
+    const cleanText = "Sure, let me think. These words are alike. It’s the author’s book.";
+    const cleanHash = await store.saveText(cleanText);
+    await store.update((db) => {
+      db.translations[`${clean.workId}|${clean.chapterId}|en|medium`] = {
+        key: `${clean.workId}|${clean.chapterId}|en|medium`, workId: clean.workId, chapterId: clean.chapterId,
+        target: "en", difficulty: "medium", hash: cleanHash,
+        warnings: [
+          { code: "term-missing", severity: "warn", detail: "Expected term(s) missing from output: Sure→Sure, Let→Let" },
+          { code: "quotes", severity: "warn", detail: "Unbalanced ‘’ quotes (0 vs 41)." },
+        ],
+      };
+    });
+    const cleanChapter = await getChapter(store, { workId: clean.workId, chapterId: clean.chapterId, lang: "en" });
+    assert.deepEqual(cleanChapter.record.warnings, [], "stale identity-term and apostrophe warnings are recalculated away");
+    assert.deepEqual(cleanChapter.record.qa, { errors: 0, warns: 0, ok: true });
+
+    const bad = await ingestText(store, { title: "Legacy QA real", sourceLang: "ja", text: "影の庭が入った。" });
+    const badTerms = await store.loadTerms(bad.workId);
+    mergeTerms(badTerms, "en", [{ source: "影の庭", translation: "Greenhouse" }]);
+    store.saveTerms(bad.workId, badTerms);
+    const badHash = await store.saveText("The garden entered.");
+    await store.update((db) => {
+      db.translations[`${bad.workId}|${bad.chapterId}|en|medium`] = {
+        key: `${bad.workId}|${bad.chapterId}|en|medium`, workId: bad.workId, chapterId: bad.chapterId,
+        target: "en", difficulty: "medium", hash: badHash, warnings: [],
+      };
+    });
+    const badChapter = await getChapter(store, { workId: bad.workId, chapterId: bad.chapterId, lang: "en" });
+    assert.ok(badChapter.record.warnings.some((warning) => warning.code === "term-missing" && warning.detail.includes("影の庭→Greenhouse")));
   });
 
   it("a term correction updates EVERY level of that language", async () => {
@@ -262,6 +315,29 @@ describe("reading levels (difficulty)", () => {
 });
 
 describe("leftover-artifact cleanup", () => {
+  it("removes repeated scraper page headers and leaked translation instructions without damaging prose", () => {
+    const messy = [
+      "Prologue",
+      "Page 1Goldenagato |",
+      "This is the actual story.",
+      "Translate the passage, preserving paragraph breaks exactly.",
+      "The hero said, ‘Keep the glossary terms unchanged.’ Then she left.",
+      "Page 2Goldenagato |",
+      "Page 3Goldenagato |",
+      "The next scene begins here.",
+    ].join("\n\n");
+    const clean = cleanTranslationArtifacts(messy, "sv");
+    assert.equal(clean, "Prologue\n\nThis is the actual story.\n\nThe hero said, ‘Keep the glossary terms unchanged.’ Then she left.\n\nThe next scene begins here.");
+    assert.doesNotMatch(clean, /Page \d+Goldenagato/);
+    assert.doesNotMatch(clean, /Translate the passage/);
+  });
+
+  it("removes page headers from imported plain text while retaining adjacent prose", async () => {
+    const { parseBuffer } = await import("../src/files.js");
+    const imported = await parseBuffer("chapter.txt", Buffer.from("Opening paragraph.\nPage 1Goldenagato |\nNext paragraph.\nPage 2Goldenagato |\n", "utf8"));
+    assert.equal(imported.trim(), "Opening paragraph.\nNext paragraph.");
+  });
+
   it("removes stray kana particles and converts Japanese quotes", () => {
     assert.equal(cleanTranslationArtifacts("Kirito drew his sword. \u3068", "es"), "Kirito drew his sword.");
     assert.equal(cleanTranslationArtifacts("\u300c\u00a1Vamos!\u300d dijo Asuna.", "es"), "\u201c\u00a1Vamos!\u201d dijo Asuna.");
@@ -521,6 +597,29 @@ describe("QA lint", () => {
     assert.ok(lintTranslation("あ".repeat(400), "あ".repeat(60), { target: "en" }).some((x) => x.code === "source-script" && x.severity === "error"));
     assert.ok(lintTranslation("a".repeat(300), "x".repeat(250) + "x".repeat(250)).some((x) => x.code === "repetition"));
     assert.ok(lintTranslation("hello", "Here is the translation: hi").some((x) => x.code === "commentary"));
+  });
+  it("ignores identity glossary words and matches real terms at word boundaries", () => {
+    const w = lintTranslation("Sure, let me think. These are like-like words.", "Sure, let me think. These are alike words.", {
+      target: "en",
+      glossary: ["Sure", "Let", "Like", "These", "Think", "Well", "chi"].map((word) => ({ source: word, target: word })),
+    });
+    assert.equal(w.some((warning) => warning.code === "term-missing"), false);
+    const realMissing = lintTranslation("The Shadow Garden met.", "The garden met.", {
+      target: "en", glossary: [{ source: "Shadow Garden", target: "Shadow Garden" }, { source: "Garden", target: "Greenhouse" }],
+    });
+    assert.ok(realMissing.some((warning) => warning.code === "term-missing" && warning.detail.includes("Garden→Greenhouse")));
+    assert.ok(!realMissing.some((warning) => warning.detail?.includes("Shadow Garden→Shadow Garden")));
+  });
+  it("does not count English apostrophes as unbalanced closing quotation marks", () => {
+    const good = lintTranslation("It’s the author’s book.", "It’s the author’s book.");
+    assert.equal(good.some((warning) => warning.code === "quotes"), false);
+    const broken = lintTranslation("x", "“Hello, she said.");
+    assert.ok(broken.some((warning) => warning.code === "quotes"));
+  });
+  it("deduplicates repeated warnings from different chunks", () => {
+    const warning = { code: "quotes", severity: "warn", detail: "Unbalanced quotes." };
+    assert.deepEqual(dedupeWarnings([warning, warning]), [warning]);
+    assert.deepEqual(summarizeWarnings([warning, warning]), { errors: 0, warns: 1, ok: true });
   });
   it("passes a good translation of a CJK source", () => {
     const w = lintTranslation("キリトは剣を抜いた。", "Kirito drew his sword.", { target: "en", glossary: [{ source: "キリト", target: "Kirito" }] });

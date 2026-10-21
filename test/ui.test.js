@@ -45,12 +45,18 @@ describe("front-end assets", () => {
     for (const k of ["name", "short_name", "start_url", "icons"]) assert.ok(manifest[k], `manifest needs ${k}`);
   });
 
+  it("does not offer forced re-translation from the QA warning panel", async () => {
+    const app = await readFile(path.join(PUBLIC, "app.js"), "utf8");
+    assert.doesNotMatch(app, /Re-translate \(force\)/);
+    assert.doesNotMatch(app, /retranslateBtn/);
+  });
+
   it("every element id used by app.js exists in index.html", async () => {
     const app = await readFile(path.join(PUBLIC, "app.js"), "utf8");
     const html = await readFile(path.join(PUBLIC, "index.html"), "utf8");
     const ids = new Set([...app.matchAll(/\$\("([A-Za-z0-9_]+)"\)/g)].map((m) => m[1]));
     // ids created dynamically at runtime are allowed
-    const dynamic = new Set(["auto_en", "auto_es", "auto_sv", "auto_de", "lvl_easy", "lvl_medium", "lvl_hard", "retranslateBtn", "jobRetry"]);
+    const dynamic = new Set(["auto_en", "auto_es", "auto_sv", "auto_de", "lvl_easy", "lvl_medium", "lvl_hard", "jobRetry"]);
     const missing = [...ids].filter((id) => !html.includes(`id="${id}"`) && !dynamic.has(id));
     assert.deepEqual(missing, [], "app.js references ids that index.html does not define: " + missing.join(", "));
   });

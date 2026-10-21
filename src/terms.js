@@ -28,7 +28,8 @@ thank thanks note notes page pages sign visit us or exclusive content
 mister missus lord lady king queen prince princess saint sir madam
 names name cover covers translation translated translations copyright vol vols volume volumes chapter chapters
 part parts book books page number numbers edition press newsletter link links subscribe bonus content
-mister madam sir novel novels author authors series story stories`.split(/\s+/).filter(Boolean));
+mister madam sir novel novels author authors series story stories
+secret fiction fantasy action title titles description identifiers subject subjects classification contents insert perfect stage tutorial role side character school official beginning mastermind two sides garden peaceful life nobody scene terrorists final idea ultimate commander appendix afterword eminence newsletter yen library congress cataloging publication data identifier fiction fantasy secret action`.split(/\s+/).filter(Boolean));
 
 /** Cheap candidates (no model call): katakana runs + Latin names. */
 export function extractCandidates(text, cap = 120) {
@@ -170,9 +171,15 @@ export function cleanNoisyTerms(terms) {
     const hasVariants = Object.values(term.langs || {}).some((l) => (l.variants || []).length);
     const canonicalSame = Object.values(term.langs || {}).every((l) => l.canonical === source);
     const short = source.length < 3;
-    const stop = STOPWORDS.has(source.toLowerCase().trim());
+    const lower = source.toLowerCase().trim();
+    const stop = STOPWORDS.has(lower);
+    const tokens = lower.split(/\s+/).filter(Boolean);
+    const allStop = tokens.length > 0 && tokens.every((t) => STOPWORDS.has(t));
     const looksLikeProse = source.split(/\s+/).length >= 4;
-    if (auto && !hasVariants && (short || stop || (canonicalSame && looksLikeProse))) {
+    // Identity rows (source === target) for ordinary words only force English
+    // into the target language — drop them unless they look like real names.
+    // Non-identity mappings (a real translation decision) are always kept.
+    if (auto && !hasVariants && canonicalSame && (short || stop || allStop || looksLikeProse)) {
       delete terms[source];
       removed.push(source);
     }
