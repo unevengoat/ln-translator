@@ -8,9 +8,9 @@ import { parseGlossary } from "./glossary.js";
 import { publicProviders } from "./engines/providers.js";
 import { LANGUAGES, normalizeCode } from "./languages.js";
 import { globalStore } from "./store.js";
-import { parseBuffer } from "./files.js";
+import { parseBuffer, parseBufferWithImages } from "./files.js";
 import {
-  ingestText, bulkIngest, workIdFor, listWorks, getWork, getChapter, translateChapter,
+  ingestText, bulkIngest, workIdFor, listWorks, getWork, getChapter, translateChapter, ensureChapter, saveStoryImages, claimStoryImages,
   correctTerm, suggestTerms, stats, searchLibrary, activityFeed, updateWork, deleteChapter, deleteWork,
   restoreVersion, importGlossary, exportGlossary, cleanTerms, deleteTerm, refreshTerms, splitChapters, sortChapters,
   DIFFICULTIES, DEFAULT_DIFFICULTY, cleanTranslationArtifacts, cleanExistingFrontMatter,
@@ -84,7 +84,7 @@ async function markInterruptedJobs() {
 }
 
 /** Translate every chapter of a story into each target × reading level, as a job. */
-function startTranslateJob(workId, targets, { force = false, difficulties = [DEFAULT_DIFFICULTY] } = {}) {
+function startTranslateJob(workId, targets, { force = false, difficulties = [DEFAULT_DIFFICULTY], ensure = true, maxPasses = 2 } = {}) {
   const levels = difficulties.map(normalizeDifficulty);
   const job = startJob("translate", { workId, targets, difficulties: levels });
   runJob(job, async () => {
@@ -99,7 +99,8 @@ function startTranslateJob(workId, targets, { force = false, difficulties = [DEF
         for (const chapter of chapters) {
           job.current = `${chapter.title} → ${target} (${level})`;
           try {
-            const r = await translateChapter(store, { workId, chapterId: chapter.id, target, difficulty: level, force });
+            const run = ensure ? ensureChapter : translateChapter;
+            const r = await run(store, { workId, chapterId: chapter.id, target, difficulty: level, force, maxPasses });
             results.push({ chapterId: chapter.id, target, difficulty: level, ok: true, cached: r.cached });
           } catch (e) {
             results.push({ chapterId: chapter.id, target, difficulty: level, ok: false, error: e.message.slice(0, 200) });
@@ -345,6 +346,10 @@ const server = createServer(async (req, res) => {
         chapterIndex: b.chapterIndex != null && b.chapterIndex !== "" ? parseInt(b.chapterIndex, 10) : null,
         text: b.text, autoTranslateTo: [], settings: b.settings || {},
       });
+      if (b.imageIds?.length || b.images?.length) {
+        const ids = [...(b.imageIds || []), ...(b.images || []).map((im) => im.id).filter(Boolean)];
+        await claimStoryImages(store, result.workId, ids);
+      }
       const job = targets.length ? startTranslateJob(result.workId, targets) : null;
       return json(res, 200, { ...result, jobId: job?.id || null, url: `/#/work/${result.workId}` });
     }
@@ -352,9 +357,13 @@ const server = createServer(async (req, res) => {
       const b = await readJson(req);
       if (!b.dataBase64) throw new Error("No file data provided.");
       const buf = Buffer.from(String(b.dataBase64).replace(/^data:[^;]+;base64,/, ""), "base64");
-      const parsed = await parseBuffer(b.name || "upload.txt", buf);
-      const chapters = splitChapters(parsed);
-      return json(res, 200, { name: b.name, chars: parsed.length, chapters: chapters.length, text: parsed });
+      const parsed = await parseBufferWithImages(b.name || "upload.txt", buf);
+      await saveStoryImages(store, parsed.images);
+      const chapters = splitChapters(parsed.text);
+      return json(res, 200, {
+        name: b.name, chars: parsed.text.length, chapters: chapters.length, text: parsed.text,
+        images: parsed.images.map((im) => ({ id: im.id, name: im.name, contentType: im.contentType, size: im.data.length })),
+      });
     }
 
     if (pathname === "/api/works/bulk" && method === "POST") {
@@ -371,6 +380,10 @@ const server = createServer(async (req, res) => {
           sourceUrl: b.sourceUrl, volume: b.volume || "", text: b.text, chapters: b.chapters,
           autoTranslateTo: [], settings: b.settings || {},
         });
+        if (b.imageIds?.length || b.images?.length) {
+          const ids = [...(b.imageIds || []), ...(b.images || []).map((im) => im.id).filter(Boolean)];
+          await claimStoryImages(store, result.workId, ids);
+        }
         job.chapters = result.chapters;
         job.done = 1;
         job.current = `saved ${result.chapters.length} chapter(s)`;
@@ -378,7 +391,7 @@ const server = createServer(async (req, res) => {
           for (const level of levels) {
             for (const c of result.chapters) {
               job.current = `${c.title} → ${target} (${level})`;
-              try { await translateChapter(store, { workId, chapterId: c.chapterId, target, difficulty: level }); }
+              try { await ensureChapter(store, { workId, chapterId: c.chapterId, target, difficulty: level }); }
               catch (e) { job.errors = [...(job.errors || []), `${c.title} → ${target} (${level}): ${e.message.slice(0, 120)}`]; }
             }
             job.done++;
@@ -396,6 +409,19 @@ const server = createServer(async (req, res) => {
         count: chapters.length, volumes,
         chapters: chapters.map((c) => ({ title: c.title, volume: c.volume, chars: c.text.length })),
       });
+    }
+
+    if (seg[0] === "api" && seg[1] === "images" && seg[2] && seg.length === 3 && method === "GET") {
+      const id = String(seg[2]);
+      if (!/^[0-9a-f]{12}$/.test(id)) return json(res, 404, { error: "Unknown image" });
+      const imageDb = await store.load();
+      const meta = imageDb.images?.[id];
+      if (!meta) return json(res, 404, { error: "Unknown image" });
+      const imageExt = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" }[meta.contentType] || "bin";
+      const imageBody = await store.loadBuffer(`images/${id}.${imageExt}`).catch(() => null);
+      if (!imageBody) return json(res, 404, { error: "Image data missing" });
+      res.writeHead(200, { "Content-Type": meta.contentType || "application/octet-stream", "Content-Length": imageBody.length, "Cache-Control": "public, max-age=86400" });
+      return res.end(imageBody);
     }
 
     if (seg[0] === "api" && seg[1] === "works" && seg[2]) {
@@ -437,7 +463,7 @@ const server = createServer(async (req, res) => {
         const b = await readJson(req);
         const targets = b.targets?.length ? b.targets.map(normalizeCode) : [normalizeCode(b.target || "en")];
         const levels = (b.difficulties?.length ? b.difficulties : [b.difficulty || DEFAULT_DIFFICULTY]).map(normalizeDifficulty);
-        const job = startTranslateJob(workId, targets, { force: !!b.force, difficulties: levels });
+        const job = startTranslateJob(workId, targets, { force: !!b.force, difficulties: levels, ensure: b.ensure !== false, maxPasses: 1 });
         return json(res, 200, { jobId: job.id, workId, targets, difficulties: levels });
       }
 
@@ -496,7 +522,8 @@ const server = createServer(async (req, res) => {
           }, 4000);
           runJob(job, async () => {
             try {
-              const r = await translateChapter(store, {
+              const run = b.ensure === false ? translateChapter : ensureChapter;
+              const r = await run(store, {
                 workId, chapterId, target, difficulty: level, force: !!b.force,
                 onProgress: ({ done, total }) => { job.done = done; job.total = total; job.current = `${target} (${level}) chunk ${done}/${total}`; },
               });

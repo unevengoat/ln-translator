@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Store, LocalBackend } from "../src/store.js";
 import {
-  ingestText, bulkIngest, splitChapters, translateChapter, translateWholeStory, correctTerm,
+  ingestText, bulkIngest, splitChapters, translateChapter, ensureChapter, ENSURE_CODES, translateWholeStory, correctTerm,
   listWorks, getWork, getChapter, stats, searchLibrary, activityFeed, updateWork,
   deleteChapter, deleteWork, restoreVersion, suggestTerms, importGlossary, exportGlossary, parseTermInput, cleanExistingFrontMatter,
   saveWorkCover, getWorkCover, deleteWorkCover,
@@ -417,6 +417,44 @@ describe("translation, memory, model pinning", () => {
     const second = await translateChapter(store, { workId: a.workId, chapterId: a.chapterId, target: "sv", translate: t });
     assert.equal(second.cached, true);
     assert.equal(t.calls.length, calls, "all completed chunks should be reused");
+  });
+
+  it("auto-ensures: retries dirty chunks unpinned, promotes leftover phrases to terms, keeps best", async () => {
+    // Two chunks (~1000 chars each). Source is English; target Swedish.
+    const para = (n) => `Chapter paragraph ${n}. ` + "The old castle stood above the quiet valley where the river bends. ".repeat(14);
+    const text = `${para(1)}\n\n${para(2)}`;
+    const calls = [];
+    const t = async (chunk, o) => {
+      calls.push({ pinned: o.pinned ? `${o.pinned.provider}/${o.pinned.model}` : null });
+      // Numbered phrase batch → translate each line faithfully (the contract
+      // promoteLeftoverPhrases relies on: genuine translations get pinned).
+      if (/^\s*\d+[.)]\s/m.test(chunk)) {
+        const GOOD = {
+          "We are the Shadow Garden": "Vi är Shadow Garden",
+          "We lurk in the darkness": "Vi lurar i mörkret",
+          "The old castle stood above the quiet valley": "Det gamla slottet stod ovanför den tysta dalen",
+        };
+        const lines = chunk.split("\n").filter((l) => /^\s*\d+[.)]\s/.test(l));
+        return { text: lines.map((l, i) => `${i + 1}. ${GOOD[l.replace(/^\s*\d+[.)]\s*/, "").trim()] || l}`).join("\n"), provider: "groq", model: "m" };
+      }
+      // A pinned (weak) model leaves English behind; a fresh provider translates fully.
+      if (o.pinned) return { text: "We are the Shadow Garden. We lurk in the darkness. " + "The old castle stood above the quiet valley. ".repeat(8), provider: "bad", model: "weak" };
+      return { text: "Vi är Shadow Garden. Vi lurar i mörkret. " + "Det gamla slottet stod ovanför den tysta dalen. ".repeat(8), provider: "groq", model: "m" };
+    };
+    const a = await ingestText(store, { title: "Ensure Story", sourceLang: "en", text, translate: t });
+    // Pin a weak model so the first pass produces English leftovers.
+    await store.update((d) => { d.works[a.workId].models = { sv: { provider: "bad", model: "weak" } }; });
+    const r = await ensureChapter(store, { workId: a.workId, chapterId: a.chapterId, target: "sv", translate: t, maxPasses: 2 });
+    assert.ok(r.passes >= 1, "polish passes ran");
+    assert.ok(!/We are the Shadow Garden/.test(r.translation), "leftover English replaced");
+    assert.ok(r.warnings.every((w) => !ENSURE_CODES.has(w.code)), "no fixable warnings remain: " + JSON.stringify(r.warnings));
+    const terms = await store.loadTerms(a.workId);
+    assert.ok(Object.keys(terms).length >= 1, "leftover phrases promoted to glossary terms");
+    // A second ensure run finds clean memory and performs no new translations.
+    const before = calls.length;
+    const again = await ensureChapter(store, { workId: a.workId, chapterId: a.chapterId, target: "sv", translate: t, maxPasses: 2 });
+    assert.equal(again.passes, 0);
+    assert.equal(calls.length, before);
   });
 
   it("reuses the loaded chapter for local term candidates instead of refetching source blobs", async () => {

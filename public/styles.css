@@ -134,6 +134,8 @@ label.chip { display: inline-flex; gap: .3rem; align-items: center; background: 
 .reader { margin: 0 auto; max-width: var(--read-width); min-width: 0; width: 100%; overflow-wrap: anywhere; word-break: normal; background: transparent; }
 .reader p { margin: 0 0 var(--read-space); white-space: pre-wrap; line-height: var(--reader-line, 1.7); letter-spacing: var(--reader-spacing, 0); }
 .reader.justify p { text-align: justify; hyphens: auto; }
+.reader p.art { text-align: center; }
+.novel-art { max-width: 100%; height: auto; display: block; margin: .5em auto; border-radius: 6px; }
 body[data-pagebg="paper"] .reader { background-image: linear-gradient(rgba(127,127,127,.05) 1px, transparent 1px); background-size: 100% 1.9rem; }
 body[data-pagebg="grain"] .reader { background-image: radial-gradient(rgba(127,127,127,.08) 1px, transparent 1px); background-size: 4px 4px; }
 body[data-pagebg="vignette"] .reader { box-shadow: inset 0 0 120px rgba(0,0,0,.25); border-radius: 10px; padding: 1.4rem; }

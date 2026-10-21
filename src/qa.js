@@ -5,9 +5,9 @@
 const CJK = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]/g;
 const KANA_HANGUL = /[\u3040-\u30ff\uac00-\ud7af]/g;
 const CJK_TARGETS = new Set(["ja", "zh-CN", "zh-TW", "ko", "th", "my"]);
-const ENGLISH_OPENERS = new Set(`a an and are as at be been being but by can could did do does for from had has have he her him his i if in into is it its just like may might must of on or our she should so than that the their them then there these they this those to was we were well will with would you your think`.split(/\s+/));
+export const ENGLISH_OPENERS = new Set(`a an and are as at be been being but by can could did do does for from had has have he her him his i if in into is it its just like may might must of on or our she should so than that the their them then there these they this those to was we were well will with would you your think`.split(/\s+/));
 // Valid Swedish sentence starters that collide with English openers.
-const SV_OPENER_EXCEPTIONS = new Set(["i", "just", "som", "att", "det", "den", "han", "hon", "vi", "de", "ett", "en"]);
+export const SV_OPENER_EXCEPTIONS = new Set(["i", "just", "som", "att", "det", "den", "han", "hon", "vi", "de", "ett", "en"]);
 
 /** Difficulty levels for the same chapter. Terms are shared; only wording changes. */
 export const DIFFICULTIES = ["easy", "medium", "hard"];

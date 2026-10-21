@@ -564,7 +564,8 @@ async function loadChapter() {
   if (ch.translation || ch.original) setProgress(currentWork.id, currentChapter, currentLang, currentLevel, `${currentWork.title} · ${ch.chapter.title}`, 8);
 }
 function renderReader(translation, original, sourceLang) {
-  const body = (s) => (s || "").split("\n\n").map((p) => `<p>${esc(p)}</p>`).join("") || `<p class="hint">No text.</p>`;
+  const art = (s) => esc(s).replace(/\[\[img:([0-9a-f]{12})\]\]/g, '<img class="novel-art" src="/api/images/$1" alt="Illustration" loading="lazy">');
+  const body = (s) => (s || "").split("\n\n").map((p) => (/^\[\[img:[0-9a-f]{12}\]\]$/.test(p.trim()) ? `<p class="art">${art(p)}</p>` : `<p>${art(p)}</p>`)).join("") || `<p class="hint">No text.</p>`;
   if (splitOn) {
     $("readerBody").innerHTML = `<h3 class="hint">${esc(langName(sourceLang))}</h3>` + body(original);
     $("readerBody2").classList.remove("hidden");
@@ -646,7 +647,7 @@ window.addEventListener("scroll", () => {
 async function doTranslate(force = false) {
   busy($("translateBtn"), true, "Translating…");
   try {
-    const r = await post(`/api/works/${currentWork.id}/chapters/${currentChapter}/translate`, { target: currentLang, difficulty: currentLevel, force });
+    const r = await post(`/api/works/${currentWork.id}/chapters/${currentChapter}/translate`, { target: currentLang, difficulty: currentLevel, force, ensure: !force });
     const job = await followJob(r.jobId, { label: `${langName(currentLang)} · ${LEVEL_LABEL[currentLevel]}`, target: $("readerMeta") });
     const res = job?.result || {};
     toast(res.cached ? "Already done" : `Translated ${res.chunks} chunks via ${res.provider}`, res.qa?.ok === false ? "warn" : "ok");
@@ -811,9 +812,11 @@ async function prefillAdd(qs) {
   }
   updateUploadStats();
 }
+let pendingImages = [];
 $("uploadFile").onchange = async () => {
   const f = $("uploadFile").files[0]; if (!f) return;
   busy($("uploadFile"), true, "Reading…");
+  pendingImages = [];
   try {
     if (/\.(epub|html?|pdf|docx|rtf|fb2|zip)$/i.test(f.name)) {
       const buf = await f.arrayBuffer();
@@ -821,7 +824,8 @@ $("uploadFile").onchange = async () => {
       for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode(...bytes.subarray(i, i + 8192));
       const parsed = await post("/api/parse-file", { name: f.name, dataBase64: btoa(bin) });
       $("uploadText").value = parsed.text;
-      toast(`Parsed ${parsed.name}: ${parsed.chars.toLocaleString()} chars, ~${parsed.chapters} chapter(s)`, "ok");
+      pendingImages = parsed.images || [];
+      toast(`Parsed ${parsed.name}: ${parsed.chars.toLocaleString()} chars, ~${parsed.chapters} chapter(s)${pendingImages.length ? `, ${pendingImages.length} illustration(s)` : ""}`, "ok");
     } else $("uploadText").value = await f.text();
     if (!$("title").value && f.name) $("title").value = f.name.replace(/\.[a-z0-9]+$/i, "").replace(/[_-]+/g, " ").replace(/\s*\b(vol(ume)?)\.?\s*\d+\s*$/i, "").trim();
     const vm = f.name.match(/\b(vol(?:ume)?\.?\s*\d+)\b/i);
@@ -863,7 +867,8 @@ async function saveChapters({ translate }) {
   try {
     LS.set("lastStory", { title, author: $("author").value });
     const body = { title, author: $("author").value, sourceLang: $("sourceLang").value, sourceUrl: $("sourceUrl").value, autoTranslateTo, difficulties, settings, volume: $("volume").value };
-    const r = $("autoSplit").checked ? await post("/api/works/bulk", { ...body, text }) : await post("/api/works", { ...body, text, chapterTitle: $("chapterTitle").value });
+    const imageIds = pendingImages.map((im) => im.id);
+    const r = $("autoSplit").checked ? await post("/api/works/bulk", { ...body, text, imageIds }) : await post("/api/works", { ...body, text, chapterTitle: $("chapterTitle").value, imageIds });
     toast("Saved", "ok"); clearAddForm();
     if (r.jobId) await followJob(r.jobId, { label: translate ? "Saving & translating" : "Saving", target: $("uploadResult") });
     await loadLibrary();
@@ -873,7 +878,7 @@ async function saveChapters({ translate }) {
 }
 $("saveTranslate").onclick = () => saveChapters({ translate: true });
 $("saveOnly").onclick = () => saveChapters({ translate: false });
-function clearAddForm() { $("uploadText").value = ""; $("chapterTitle").value = ""; $("splitPreview").innerHTML = ""; $("uploadResult").innerHTML = ""; $("addHint").textContent = ""; updateUploadStats(); }
+function clearAddForm() { $("uploadText").value = ""; $("chapterTitle").value = ""; $("splitPreview").innerHTML = ""; $("uploadResult").innerHTML = ""; $("addHint").textContent = ""; pendingImages = []; updateUploadStats(); }
 
 /* ------------------------------------------------------- activity / about */
 async function loadActivity() {

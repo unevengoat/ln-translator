@@ -127,8 +127,15 @@ export function mergeTerms(terms, lang, pairs) {
     const { canonical, auto } = canonicalFor(source);
     const slot = term.langs[lang] || (term.langs[lang] = { canonical: null, variants: [], origin: "auto", at: Date.now() });
     if (!slot.canonical) {
-      slot.canonical = canonical || translation;
-      if (canonical && canonical !== translation) slot.variants.push(translation);
+      if (translation && translation !== source && canonical === source) {
+        // An explicit translation (e.g. a leftover phrase the model just
+        // translated) wins over the Latin "keep as-is" default — otherwise
+        // the glossary would tell the model to keep English in the output.
+        slot.canonical = translation;
+      } else {
+        slot.canonical = canonical || translation;
+        if (canonical && canonical !== translation) slot.variants.push(translation);
+      }
       if (!auto) term.origin = "auto";
       added++;
     } else if (slot.canonical !== translation && !slot.variants.includes(translation)) {

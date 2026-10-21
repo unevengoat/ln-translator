@@ -446,6 +446,21 @@ export class Store {
         for (const d of ["medium", "easy", "hard"]) tm[`${w.id}|${lang}|${d}`] = await this.loadTm(w.id, lang, d).catch(() => ({}));
       }
     }
+    // illustrations referenced by chapter texts (bounded: big scans stay in live storage)
+    let images = { registry: {}, blobs: {}, skipped: 0 };
+    try {
+      images.registry = db.images || {};
+      let bytes = 0;
+      const extOf = (ct) => ({ "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" }[ct] || "bin");
+      for (const [id, meta] of Object.entries(images.registry)) {
+        if (bytes > 12_000_000) { images.skipped++; continue; }
+        const body = await this.loadBuffer(`images/${id}.${extOf(meta.contentType)}`).catch(() => null);
+        if (!body) { images.skipped++; continue; }
+        if (body.length > 4_000_000 || bytes + body.length > 15_000_000) { images.skipped++; continue; }
+        images.blobs[id] = body.toString("base64");
+        bytes += body.length;
+      }
+    } catch { /* images stay in live storage */ }
     // profiles + their private reading state (so a backup is complete)
     let profiles = null;
     const states = {};
@@ -459,7 +474,7 @@ export class Store {
         }
       }
     } catch { /* ignore */ }
-    return { format: "ln-translator-export", version: 2, exportedAt: Date.now(), backend: this.backendName, db: this.db, texts, terms, tm, profiles, states };
+    return { format: "ln-translator-export", version: 3, exportedAt: Date.now(), backend: this.backendName, db: this.db, texts, terms, tm, profiles, states, images };
   }
 
   /** Merge an export into this store. Never deletes; newest record wins. */
@@ -509,6 +524,17 @@ export class Store {
       const current = await this.loadTm(workId, lang, difficulty);
       for (const [h, v] of Object.entries(tm || {})) if (!current[h]) { current[h] = v; stats.tm++; }
       this.saveTm(workId, lang, current, difficulty);
+    }
+    stats.images = 0;
+    const imgExtOf = (ct) => ({ "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" }[ct] || "bin");
+    for (const [id, meta] of Object.entries(payload.images?.registry || {})) {
+      const db0 = await this.load();
+      if (!db0.images?.[id]) await this.update((db) => { db.images = db.images || {}; db.images[id] = meta; });
+      const blob = payload.images?.blobs?.[id];
+      if (blob && !(await this.loadBuffer(`images/${id}.${imgExtOf(meta.contentType)}`).catch(() => null))) {
+        await this.backend.putBuffer(`images/${id}.${imgExtOf(meta.contentType)}`, Buffer.from(blob, "base64"), meta.contentType || "application/octet-stream", `import image ${id}`).catch(() => null);
+        stats.images++;
+      }
     }
     await this.flush();
     // profiles (merge by name, keep local PINs)

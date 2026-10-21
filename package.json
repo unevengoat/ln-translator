@@ -13,7 +13,7 @@
     "start": "node src/server.js",
     "dev": "node src/server.js --port 3000",
     "cli": "node src/cli.js --help",
-    "test": "node --test test/translator.test.js test/library.test.js test/storage.test.js test/ui.test.js test/profiles.test.js"
+    "test": "node --test test/translator.test.js test/library.test.js test/storage.test.js test/ui.test.js test/profiles.test.js test/images.test.js test/novels.test.js"
   },
   "dependencies": {
     "jszip": "^3.10.1",

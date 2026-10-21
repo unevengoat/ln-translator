@@ -10,7 +10,12 @@ import {
   termsGlossary, mergeTerms, extractTermsWithModel, latinCandidates, termForms,
   termCounts, termsToCsv, parseCsv, parseGlossary, cleanNoisyTerms,
 } from "./terms.js";
-import { lintTranslation, dedupeWarnings, summarizeWarnings, cleanNovelArtifacts, cleanTranslationArtifacts, normalizeDifficulty, DEFAULT_DIFFICULTY, DIFFICULTIES } from "./qa.js";
+import { lintTranslation, dedupeWarnings, summarizeWarnings, cleanNovelArtifacts, cleanTranslationArtifacts, normalizeDifficulty, DEFAULT_DIFFICULTY, DIFFICULTIES, ENGLISH_OPENERS, SV_OPENER_EXCEPTIONS } from "./qa.js";
+import { extractImageIds } from "./files.js";
+
+/** Function words that strongly suggest an English sentence (subset used to spot leftover source text). */
+const ENGLISH_LIKELY = new Set([...ENGLISH_OPENERS].filter((w) => !["i", "just", "a", "an", "in", "on", "to", "of", "as", "at", "so", "or", "if", "are", "was", "were", "be", "been", "will", "with", "for", "from", "that", "this", "these", "those", "they", "them", "then", "there", "than", "you", "your", "he", "him", "his", "her", "she", "our", "we", "it", "its", "is", "the"].includes(w)));
+const SV_OPENER_SKIP = SV_OPENER_EXCEPTIONS;
 
 // Chunk size is part of the translation-memory key: changing it invalidates the
 // whole cache, so keep this stable.
@@ -39,8 +44,63 @@ const newWork = (id, { title, author, sourceLang, sourceUrl }) => ({
   lang: sourceLang || "auto", sourceUrl: sourceUrl || "",
   createdAt: Date.now(), updatedAt: Date.now(),
   chapters: [], volumes: [], languages: [], models: {}, settings: { ...DEFAULT_SETTINGS },
-  terms: {}, tmSegments: {}, usage: { calls: 0, chunks: 0, byModel: {} }, termExtracted: {},
+  terms: {}, tmSegments: {}, usage: { calls: 0, chunks: 0, byModel: {} }, termExtracted: {}, images: [],
 });
+
+const IMAGE_EXT = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
+
+/** Persist illustration bytes (content-addressed) and register them. */
+export async function saveStoryImages(store, images) {
+  const ids = [];
+  for (const img of images || []) {
+    if (!img?.id || !img?.data?.length) continue;
+    const ext = IMAGE_EXT[img.contentType] || "bin";
+    try {
+      await store.saveBuffer(`images/${img.id}.${ext}`, Buffer.from(img.data), img.contentType || "application/octet-stream");
+    } catch { continue; }
+    ids.push(img.id);
+  }
+  if (ids.length) {
+    await store.update((db) => {
+      db.images = db.images || {};
+      for (const img of images) {
+        if (!ids.includes(img.id)) continue;
+        const prev = db.images[img.id] || {};
+        db.images[img.id] = { contentType: img.contentType || prev.contentType || "application/octet-stream", at: prev.at || Date.now() };
+      }
+    });
+    await store.flush();
+  }
+  return ids;
+}
+
+/** Attach illustration ids to a work (markers in the text carry placement). */
+export async function claimStoryImages(store, workId, ids) {
+  const unique = [...new Set(ids || [])];
+  if (!unique.length) return [];
+  await store.update((db) => {
+    const work = db.works[workId];
+    if (work) {
+      work.images = [...new Set([...(work.images || []), ...unique])];
+      work.updatedAt = Date.now();
+    }
+    db.images = db.images || {};
+    for (const id of unique) {
+      const prev = db.images[id] || {};
+      const works = new Set([...(prev.works || []), workId]);
+      db.images[id] = { ...prev, works: [...works] };
+    }
+  });
+  await store.flush();
+  return unique;
+}
+
+/** Illustration references found in chapter texts. */
+function chapterImages(...texts) {
+  const ids = [];
+  for (const t of texts) for (const id of extractImageIds(t)) if (!ids.includes(id)) ids.push(id);
+  return ids.map((id) => ({ id, url: `/api/images/${id}` }));
+}
 
 /* ------------------------------------------------------- chapters / splitting */
 
@@ -438,6 +498,8 @@ export async function ingestText(store, {
     await store.update((d) => { const w = d.works[result.workId]; if (w) w.terms = termCounts(terms); });
     if (flush) await store.flush();
   }
+  // Illustration markers travel inside the text; register them on the work.
+  result.images = await claimStoryImages(store, result.workId, extractImageIds(norm));
 
   for (const target of autoTranslateTo) {
     if (!target || target === (sourceLang || "")) continue;
@@ -489,7 +551,7 @@ export async function bulkIngest(store, {
 
 export async function translateChapter(store, {
   workId, chapterId, target, difficulty = DEFAULT_DIFFICULTY, force = false, fetchFn = fetch,
-  translate = translateWithPolicy, onProgress, providers,
+  translate = translateWithPolicy, onProgress, providers, onlyChunks = null, ignorePinned = false,
 } = {}) {
   if (!target) throw new Error("A target language is required.");
   const level = normalizeDifficulty(difficulty);
@@ -517,11 +579,17 @@ export async function translateChapter(store, {
   const tm = await store.loadTm(workId, target, level);
   const chunks = chunkNovel(normalizeText(text), MAX_CHUNK);
 
-  let pinned = work.models?.[target] || null;
+  let pinned = ignorePinned ? null : (work.models?.[target] || null);
   const results = [];
   const todo = [];
   chunks.forEach((c, i) => {
     const hit = tm[sha256(c)];
+    if (onlyChunks && !onlyChunks.includes(i)) {
+      // Polish pass: leave clean chunks untouched (translate only if memory is missing).
+      if (hit) results[i] = hit.text;
+      else todo.push(i);
+      return;
+    }
     if (hit && !force) results[i] = hit.text;
     else todo.push(i);
   });
@@ -612,8 +680,161 @@ export async function translateChapter(store, {
   return { translation, chunks: chunks.length, cached: todo.length === 0, provider, difficulty: level, warnings: uniqueWarnings, qa: summarizeWarnings(uniqueWarnings) };
 }
 
+/** Warning codes the auto-ensure loop tries to fix with polish passes. */
+export const ENSURE_CODES = new Set(["english-opener", "source-script", "term-missing", "commentary"]);
+
+/** Codes from linting one chunk that auto-ensure should act on. */
+function chunkEnsureCodes(chunkSrc, chunkOut, { target, glossary }) {
+  if (chunkOut == null) return ["empty"];
+  return [...new Set(lintTranslation(chunkSrc, chunkOut, { target, glossary }).filter((w) => ENSURE_CODES.has(w.code)).map((w) => w.code))];
+}
+
+/**
+ * Leftover source-language sentences the model failed to translate (the ones
+ * behind `english-opener` warnings). Capped so one bad chapter cannot burn
+ * the free tier.
+ */
+function leftoverSentences(translation, { target, cap = 8 } = {}) {
+  const out = [];
+  for (const sentence of String(translation || "").split(/[.!?…]+|\n+/)) {
+    const trimmed = sentence.trim().replace(/^[\u201c\"'(\[]+/, "");
+    // Short dialogue leftovers ("Are you with me?") are the most common
+    // failure, so the floor stays low.
+    if (trimmed.length < 12 || trimmed.length > 220) continue;
+    const first = trimmed.match(/^([A-Za-z]+)/)?.[1];
+    if (!first || !/[A-Za-z]{2,}/.test(trimmed)) continue;
+    if (target === "sv" && SV_OPENER_SKIP.has(first.toLowerCase())) continue;
+    if (!ENGLISH_LIKELY.has(first.toLowerCase()) && !/\b(the|a|an|of|to|and|you|we|they|it|is|are|was|were|will|with|that|this|for|from)\b/i.test(trimmed)) continue;
+    if (!out.includes(trimmed)) out.push(trimmed);
+    if (out.length >= cap) break;
+  }
+  return out;
+}
+
+/** Translate leftover phrases in one batched call and pin them as glossary
+ *  terms, so every later chunk translates them the same way. Best-effort:
+ *  returns how many terms were added (0 when the model output is unusable). */
+async function promoteLeftoverPhrases(store, { workId, target, phrases, translate, fetchFn, source, settings }) {
+  if (!phrases.length) return 0;
+  const numbered = phrases.map((p, i) => `${i + 1}. ${p}`).join("\n");
+  let raw;
+  try {
+    const r = await translate(numbered, {
+      source, target, glossary: [], prevTail: "",
+      pinned: null, fetchFn, keepHonorifics: settings.keepHonorifics, formality: settings.formality,
+      notes: "Translate each numbered line to the target language. Reply with ONLY the same numbered list, one translation per line, no commentary.",
+      difficulty: DEFAULT_DIFFICULTY, sameLanguage: false,
+    });
+    raw = r.text;
+  } catch { return 0; }
+  const byNumber = new Map();
+  for (const line of String(raw || "").split("\n")) {
+    const m = line.match(/^\s*(\d+)[.)]\s*(.+?)\s*$/);
+    if (m && !byNumber.has(Number(m[1]))) byNumber.set(Number(m[1]), m[2]);
+  }
+  let lines = [...byNumber.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
+  if (!lines.length) {
+    const fallback = String(raw || "").split("\n").map((l) => l.trim()).filter(Boolean);
+    if (fallback.length === phrases.length) lines = fallback;
+  }
+  if (lines.length !== phrases.length) return 0;
+  const pairs = phrases.map((source, i) => ({ source, translation: lines[i] })).filter((p) => p.translation && p.translation !== p.source);
+  if (!pairs.length) return 0;
+  const terms = await store.loadTerms(workId);
+  const added = mergeTerms(terms, target, pairs);
+  store.saveTerms(workId, terms);
+  await store.update((db) => { const w = db.works[workId]; if (w) { w.terms = termCounts(terms); w.updatedAt = Date.now(); } });
+  return added;
+}
+
+/**
+ * Translate a chapter, then automatically polish it until QA is clean (or the
+ * pass budget runs out). Polish passes retranslate ONLY the chunks that still
+ * trip fixable warnings, ignoring the pinned model so a weak model cannot
+ * keep re-emitting the same bad output, and keep the better text per chunk.
+ * Leftover source-language phrases are promoted to glossary terms first, so
+ * they are translated once and reused consistently everywhere afterwards.
+ */
+export async function ensureChapter(store, {
+  workId, chapterId, target, difficulty = DEFAULT_DIFFICULTY, force = false, fetchFn = fetch,
+  translate = translateWithPolicy, onProgress, providers, maxPasses = 2,
+} = {}) {
+  const first = await translateChapter(store, {
+    workId, chapterId, target, difficulty, force, fetchFn, translate, onProgress, providers,
+  });
+  let result = first;
+  let passes = 0;
+  const level = normalizeDifficulty(difficulty);
+  for (let pass = 1; pass <= maxPasses; pass++) {
+    const db = await store.load();
+    const work = db.works[workId];
+    if (!work) break;
+    const chapter = work.chapters.find((c) => c.id === chapterId);
+    if (!chapter) break;
+    const text = await store.loadText(chapter.sourceHash);
+    const chunks = chunkNovel(normalizeText(text), MAX_CHUNK);
+    const terms = await store.loadTerms(workId);
+    let allGlossary = termsGlossary(terms, target);
+    const tm = await store.loadTm(workId, target, level);
+    const current = chunks.map((c) => tm[sha256(c)]?.text ?? null);
+    const dirty = [];
+    for (let i = 0; i < chunks.length; i++) {
+      if (chunkEnsureCodes(chunks[i], current[i], { target, glossary: allGlossary }).length) dirty.push(i);
+    }
+    if (!dirty.length) break;
+    passes = pass;
+    const settings = { ...DEFAULT_SETTINGS, ...(work.settings || {}) };
+    // 1. Pin leftover phrases as terms so the polish pass translates them once
+    //    and every later chunk reuses the same translation.
+    const dirtyText = dirty.map((i) => current[i]).filter(Boolean).join("\n\n");
+    await promoteLeftoverPhrases(store, {
+      workId, target, translate, fetchFn, source: work.lang, settings,
+      phrases: leftoverSentences(dirtyText, { target }),
+    });
+    // Fresh terms change what counts as a violation below.
+    allGlossary = termsGlossary(await store.loadTerms(workId), target);
+    // 2. Retranslate only the dirty chunks, ignoring the pinned model.
+    const before = new Map(dirty.map((i) => [i, current[i]]));
+    await translateChapter(store, {
+      workId, chapterId, target, difficulty, force: true, fetchFn, translate,
+      onProgress, providers, onlyChunks: dirty, ignorePinned: true,
+    });
+    // 3. Keep whichever text trips fewer fixable warnings, per chunk.
+    const tmAfter = await store.loadTm(workId, target, level);
+    let restored = 0;
+    for (const i of dirty) {
+      const oldText = before.get(i);
+      const newText = tmAfter[sha256(chunks[i])]?.text ?? null;
+      const oldBad = chunkEnsureCodes(chunks[i], oldText, { target, glossary: allGlossary }).length;
+      const newBad = chunkEnsureCodes(chunks[i], newText, { target, glossary: allGlossary }).length;
+      if (oldText != null && newBad > oldBad) {
+        tmAfter[sha256(chunks[i])] = { text: oldText, at: Date.now(), difficulty: level };
+        restored++;
+      }
+    }
+    if (restored) store.saveTm(workId, target, tmAfter, level);
+    // 4. Rebuild the stored translation from the winning chunk texts.
+    const finalChunks = chunks.map((c) => (tmAfter[sha256(c)] || {}).text);
+    const finalText = cleanTranslationArtifacts(finalChunks.filter((v) => v !== undefined).join("\n\n"), target);
+    const chunkWarnings = [];
+    chunks.forEach((c, i) => { if (finalChunks[i] != null) chunkWarnings.push(...lintTranslation(c, finalChunks[i], { target, glossary: allGlossary })); });
+    chunkWarnings.push(...lintTranslation(text, finalText, { target, glossary: allGlossary }));
+    const uniqueWarnings = dedupeWarnings(chunkWarnings);
+    const hash = await store.saveText(finalText);
+    await store.update((db2) => {
+      const tkey = `${workId}|${chapterId}|${target}|${level}`;
+      const rec = db2.translations[tkey];
+      if (rec) { rec.hash = hash; rec.warnings = uniqueWarnings; rec.qa = summarizeWarnings(uniqueWarnings); rec.at = Date.now(); }
+    });
+    await store.flush();
+    result = { translation: finalText, chunks: chunks.length, cached: false, provider: result.provider, difficulty: level, warnings: uniqueWarnings, qa: summarizeWarnings(uniqueWarnings) };
+    if (!uniqueWarnings.some((w) => ENSURE_CODES.has(w.code))) break;
+  }
+  return { ...result, passes };
+}
+
 /** Translate chapters into one or more languages × reading levels (job-friendly). */
-export async function translateWholeStory(store, { workId, target, difficulties = [DEFAULT_DIFFICULTY], force = false, fetchFn = fetch, translate = translateWithPolicy, onProgress } = {}) {
+export async function translateWholeStory(store, { workId, target, difficulties = [DEFAULT_DIFFICULTY], force = false, fetchFn = fetch, translate = translateWithPolicy, onProgress, maxPasses = 2 } = {}) {
   const db = await store.load();
   const work = db.works[workId];
   if (!work) throw new Error("Unknown story: " + workId);
@@ -623,7 +844,7 @@ export async function translateWholeStory(store, { workId, target, difficulties 
   for (const level of levels) {
     for (const chapter of chapters) {
       try {
-        const r = await translateChapter(store, { workId, chapterId: chapter.id, target, difficulty: level, force, fetchFn, translate });
+        const r = await ensureChapter(store, { workId, chapterId: chapter.id, target, difficulty: level, force, fetchFn, translate, maxPasses });
         out.push({ chapterId: chapter.id, title: chapter.title, difficulty: level, ok: true, cached: r.cached, qa: r.qa });
       } catch (e) {
         out.push({ chapterId: chapter.id, title: chapter.title, difficulty: level, ok: false, error: e.message.slice(0, 200) });
@@ -688,6 +909,7 @@ export async function getWork(store, workId) {
     languages: work.languages || [], settings: work.settings || {}, models: work.models || {},
     usage: work.usage || { calls: 0, chunks: 0, byModel: {} }, tmSegments: work.tmSegments || {},
     chapters, volumes,
+    images: (work.images || []).map((id) => ({ id, url: `/api/images/${id}` })),
     // NOTE: the term table is deliberately NOT embedded (it can be ~340 KB);
     // clients use GET /api/works/:id/terms?lang=xx instead.
     termCount: Object.keys(terms).length,
@@ -737,6 +959,7 @@ export async function getChapter(store, { workId, chapterId, lang = "", difficul
   return {
     work: { id: work.id, title: work.title, author: work.author, lang: work.lang, settings: work.settings, languages: work.languages, volumes: work.volumes || [] },
     chapter, original, translation, available, record,
+    images: chapterImages(original, translation),
     prev: pos > 0 ? { id: chapters[pos - 1].id, title: chapters[pos - 1].title, volume: chapters[pos - 1].volume } : null,
     next: pos < chapters.length - 1 ? { id: chapters[pos + 1].id, title: chapters[pos + 1].title, volume: chapters[pos + 1].volume } : null,
   };
