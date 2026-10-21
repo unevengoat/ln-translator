@@ -1,8 +1,7 @@
 // Model policy: keep a story on one model when possible, otherwise spread the work
 // across the free provider pool (see pool.js). Nothing here needs a paid account.
-import { translateAiChunk } from "./aiEngine.js";
-import { resolveProvider, PROVIDERS } from "./providers.js";
-import { translatePooled, PoolExhaustedError, configuredProviders, poolStatus } from "./pool.js";
+import { PROVIDERS } from "./providers.js";
+import { translatePinned, translatePooled, PoolExhaustedError, configuredProviders, poolStatus } from "./pool.js";
 import { isTransient, isModelMissing, retryAfterMs, sleep } from "./limits.js";
 
 export const PRIMARY = { provider: "groq", model: "openai/gpt-oss-120b" };
@@ -58,16 +57,19 @@ export async function translateWithPolicy(chunk, opts = {}) {
   const attempts = [];
 
   if (pinned?.provider && envKey(pinned.provider)) {
-    for (const model of [pinned.model, ...pickCandidates(pinned.provider, await listModels(pinned.provider, envKey(pinned.provider), fetchFn).catch(() => []))]) {
-      if (!model) continue;
+    // Use the pinned model directly on the hot path. Only query the provider's
+    // model catalog after an explicit model-missing response.
+    const models = [pinned.model || PROVIDERS[pinned.provider]?.models?.[0]].filter(Boolean);
+    for (const model of models) {
       try {
-        const config = resolveProvider(pinned.provider, { model, timeoutMs });
-        const text = await translateAiChunk(chunk, { ...rest, fetchFn, config });
-        attempts.push({ provider: `${pinned.provider}/${model}`, ok: true });
-        return { text, provider: pinned.provider, model, attempts };
+        const r = await translatePinned(chunk, { ...rest, fetchFn, timeoutMs }, { provider: pinned.provider, model });
+        return { ...r, attempts: [...attempts, ...r.attempts] };
       } catch (e) {
         attempts.push({ provider: `${pinned.provider}/${model}`, ok: false, error: String(e.message).slice(0, 160) });
-        if (!isModelMissing(e.message)) break; // rate limit etc → just use the pool
+        if (!isModelMissing(e.message)) break; // rate limits go through the pool
+        const candidates = pickCandidates(pinned.provider, await listModels(pinned.provider, envKey(pinned.provider), fetchFn).catch(() => []));
+        const replacement = candidates.find((candidate) => !models.includes(candidate));
+        if (replacement) models.push(replacement);
         await sleep(150);
       }
     }

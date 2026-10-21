@@ -16,7 +16,7 @@
 //
 // Writes are cached in memory and flushed on a debounce, plus an explicit
 // flush() after every meaningful operation, so we stay well inside rate limits.
-import { readFile, writeFile, mkdir, rename, readdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rename, readdir, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { r2FromEnv } from "./s3.js";
@@ -37,6 +37,9 @@ export class LocalBackend {
   async getText(p) {
     try { return await readFile(this._p(p), "utf8"); } catch { return null; }
   }
+  async getBuffer(p) {
+    try { return await readFile(this._p(p)); } catch { return null; }
+  }
   async putText(p, body) {
     const full = this._p(p);
     await mkdir(path.dirname(full), { recursive: true });
@@ -44,6 +47,18 @@ export class LocalBackend {
     const tmp = `${full}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
     await writeFile(tmp, body, "utf8");
     await rename(tmp, full);
+    return true;
+  }
+  async putBuffer(p, body) {
+    const full = this._p(p);
+    await mkdir(path.dirname(full), { recursive: true });
+    const tmp = `${full}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+    await writeFile(tmp, Buffer.from(body));
+    await rename(tmp, full);
+    return true;
+  }
+  async delete(p) {
+    try { await unlink(this._p(p)); } catch (e) { if (e.code !== "ENOENT") throw e; }
     return true;
   }
   async listKeys(prefix) {
@@ -63,7 +78,10 @@ export class R2Backend {
   name = "cloudflare-r2";
   constructor(client) { this.client = client; }
   getText(p) { return this.client.get(p); }
+  async getBuffer(p) { return this.client.getBuffer(p); }
   putText(p, body) { return this.client.put(p, body, "application/octet-stream"); }
+  putBuffer(p, body, contentType) { return this.client.put(p, body, contentType); }
+  delete(p) { return this.client.delete(p); }
   listKeys(prefix) { return this.client.list(prefix); }
   async revision(p) { const r = await this.client.head(p).catch(() => null); return r?.etag || null; }
   describe() { return `Cloudflare R2 (${this.client.bucket})`; }
@@ -91,6 +109,45 @@ export class GitHubBackend {
     const etag = res.headers?.get?.("etag");
     if (etag) this.shas.set(p, etag);
     return res.text();
+  }
+
+  async getBuffer(p) {
+    const res = await this.fetchFn(this._url(p) + `?ref=${this.branch}`, { headers: this._headers("application/vnd.github.raw") });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`GitHub GET ${p} → ${res.status}`);
+    return Buffer.from(await res.arrayBuffer());
+  }
+
+  async putBuffer(p, body, contentType = "application/octet-stream", message = `update ${p}`) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const sha = await this._sha(p);
+      const res = await this.fetchFn(this._url(p), {
+        method: "PUT",
+        headers: { ...this._headers("application/vnd.github+json"), "Content-Type": "application/json" },
+        body: JSON.stringify({ message, content: Buffer.from(body).toString("base64"), branch: this.branch, ...(sha ? { sha } : {}) }),
+      });
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        if (data?.content?.sha) this.shas.set(p, data.content.sha);
+        return true;
+      }
+      if (res.status === 409 || res.status === 422) { this.shas.delete(p); continue; }
+      if (res.status === 403 || res.status === 429) { await new Promise((r) => setTimeout(r, 1500 * (attempt + 1))); continue; }
+      throw new Error(`GitHub PUT ${p} → ${res.status} ${(await res.text()).slice(0, 200)}`);
+    }
+    throw new Error(`GitHub PUT ${p} failed after retries`);
+  }
+
+  async delete(p) {
+    const sha = await this._sha(p);
+    if (!sha) return true;
+    const res = await this.fetchFn(this._url(p), {
+      method: "DELETE", headers: { ...this._headers("application/vnd.github+json"), "Content-Type": "application/json" },
+      body: JSON.stringify({ message: `delete ${p}`, sha, branch: this.branch }),
+    });
+    if (!res.ok && res.status !== 404) throw new Error(`GitHub DELETE ${p} → ${res.status} ${(await res.text()).slice(0, 200)}`);
+    this.shas.delete(p);
+    return true;
   }
 
   async _sha(p) {
@@ -206,22 +263,45 @@ export class Store {
    */
   async maybeRefresh(minMs = 120000) {
     if (!this.db) return false;
-    if (Date.now() - (this.lastCheck || 0) < minMs) return false;
-    this.lastCheck = Date.now();
-    try {
-      const rev = await this._rev();
-      if (rev && this.dbRev && rev !== this.dbRev) { await this.reload(); return true; }
-      if (rev) this.dbRev = rev;
-    } catch { /* ignore */ }
-    return false;
+    const run = this.queue.then(async () => {
+      if (!this.db || Date.now() - (this.lastCheck || 0) < minMs) return false;
+      // Never reload over unsaved work. Check again on the next read after the
+      // pending write has completed.
+      if (this.pending.size) return false;
+      this.lastCheck = Date.now();
+      try {
+        const rev = await this._rev();
+        if (rev && this.dbRev && rev !== this.dbRev) {
+          await this.flush();
+          await this._reload();
+          return true;
+        }
+        if (rev) this.dbRev = rev;
+      } catch { /* ignore transient revision failures */ }
+      return false;
+    });
+    this.queue = run.catch(() => {});
+    return run;
   }
 
-  /** Drop in-memory state and read everything fresh from storage. */
-  async reload() {
+  /** Reload safely after any queued updates; never discard pending local writes. */
+  reload() {
+    const run = this.queue.then(async () => {
+      if (this.pending.size) await this.flush();
+      return this._reload();
+    });
+    this.queue = run.catch(() => {});
+    return run;
+  }
+
+  /** Drop clean in-memory caches and read everything fresh from storage. */
+  async _reload() {
     this.db = null;
+    this.hashes = new Set();
     this.termsCache.clear();
     this.tmCache.clear();
     this.rawCache.clear();
+    this.dbRev = null;
     return this.load();
   }
 
@@ -282,6 +362,24 @@ export class Store {
     if (t == null) throw new Error("Text blob not found: " + hash);
     this.textCache.set(hash, t);
     return t;
+  }
+
+  async loadBuffer(path) {
+    if (!this.backend.getBuffer) throw new Error(`Binary storage is not supported by ${this.backendName}.`);
+    const body = await this.backend.getBuffer(path);
+    if (body == null) return null;
+    return Buffer.from(body);
+  }
+
+  async saveBuffer(path, body, contentType) {
+    if (!this.backend.putBuffer) throw new Error(`Binary storage is not supported by ${this.backendName}.`);
+    await this.backend.putBuffer(path, body, contentType, `ln-translator: ${path}`);
+    return true;
+  }
+
+  async deleteFile(path) {
+    if (!this.backend.delete) throw new Error(`File deletion is not supported by ${this.backendName}.`);
+    return this.backend.delete(path);
   }
 
   /* ---- per-story terms ---- */

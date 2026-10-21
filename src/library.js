@@ -282,24 +282,31 @@ function chapterTitleFor(part, index) {
 
 /* ------------------------------------------------------------------- terms */
 
-export async function ensureTermsForLang(store, workId, lang, { fetchFn = fetch } = {}) {
+const termExtractionLocks = new Map();
+
+export async function ensureTermsForLang(store, workId, lang, { fetchFn = fetch, useModel = true, sampleText } = {}) {
   if (!lang) return 0;
   const db = await store.load();
   const work = db.works[workId];
   if (!work || work.termExtracted?.[lang]) return 0;
-  // Sample the first few chapters (bounded) so names from later chapters are
-  // covered too — using only chapter 1 left most of a book with English-only terms.
-  const sampleChapters = sortChapters(work).slice(0, 3);
-  let sample = "";
-  for (const c of sampleChapters) {
-    sample += (await store.loadText(c.sourceHash).catch(() => "")) + "\n\n";
-    if (sample.length > 14000) break;
+  const lockKey = `${workId}|${lang}`;
+  if (termExtractionLocks.has(lockKey)) return termExtractionLocks.get(lockKey);
+  const task = (async () => {
+  // During translation the current chapter is already loaded; reuse it rather
+  // than fetching several more source blobs from remote storage before the first
+  // model request. Explicit term refresh still samples a few chapters.
+  let sample;
+  if (sampleText !== undefined) {
+    sample = String(sampleText).slice(0, 14000);
+  } else {
+    const sampleChapters = sortChapters(work).slice(0, 3);
+    sample = (await Promise.all(sampleChapters.map((c) => store.loadText(c.sourceHash).catch(() => ""))))
+      .join("\n\n").slice(0, 14000);
   }
-  sample = sample.slice(0, 14000);
   const terms = await store.loadTerms(workId);
   // Latin originals are canonical in every language — cheap, always applied.
   let added = mergeTerms(terms, lang, latinCandidates(sample).slice(0, 200).map((c) => ({ source: c, translation: c })));
-  const key = process.env.GROQ_API_KEY || process.env.AI_API_KEY;
+  const key = useModel && (process.env.GROQ_API_KEY || process.env.AI_API_KEY);
   if (key && sample) {
     try {
       const pairs = await extractTermsWithModel(sample, {
@@ -316,12 +323,27 @@ export async function ensureTermsForLang(store, workId, lang, { fetchFn = fetch 
         }
       });
     } catch { /* leave unset so a later request retries */ }
+  } else {
+    // No model key: translation can proceed with local Latin-name candidates;
+    // avoid rescanning source text on every chapter in the same target language.
+    store.saveTerms(workId, terms);
+    await store.update((d) => {
+      const w = d.works[workId];
+      if (w) {
+        w.termExtracted = { ...(w.termExtracted || {}), [lang]: true };
+        w.terms = termCounts(terms);
+      }
+    });
   }
   return added;
+  })();
+  termExtractionLocks.set(lockKey, task);
+  try { return await task; }
+  finally { if (termExtractionLocks.get(lockKey) === task) termExtractionLocks.delete(lockKey); }
 }
 
 /** Force a fresh term discovery for one language (re-samples several chapters). */
-export async function refreshTerms(store, { workId, lang }) {
+export async function refreshTerms(store, { workId, lang, fetchFn = fetch }) {
   if (!workId || !lang) throw new Error("workId and lang are required.");
   await store.update((d) => {
     const w = d.works[workId];
@@ -332,7 +354,7 @@ export async function refreshTerms(store, { workId, lang }) {
     }
   });
   await store.flush();
-  const added = await ensureTermsForLang(store, workId, lang);
+  const added = await ensureTermsForLang(store, workId, lang, { fetchFn });
   const terms = await store.loadTerms(workId);
   const mapped = Object.values(terms).filter((t) => t.langs?.[lang]?.canonical).length;
   return { added, mapped, total: Object.keys(terms).length };
@@ -478,7 +500,11 @@ export async function translateChapter(store, {
   if (!chapter) throw new Error("Unknown chapter: " + chapterId);
   const sameLanguage = target === work.lang; // allowed: rewrite/simplify in the same language
 
-  await ensureTermsForLang(store, workId, target, { fetchFn });
+  const text = await store.loadText(chapter.sourceHash);
+  // Keep translation's first request focused on translation. Reuse the already
+  // loaded chapter for local term candidates; model-assisted extraction remains
+  // available through the explicit Refresh terms action.
+  await ensureTermsForLang(store, workId, target, { fetchFn, useModel: false, sampleText: text });
   const settings = { ...DEFAULT_SETTINGS, ...(work.settings || {}) };
   const terms = await store.loadTerms(workId);
   const allGlossary = termsGlossary(terms, target);
@@ -489,7 +515,6 @@ export async function translateChapter(store, {
   // Real name-keeping still happens naturally; lint also ignores identity.
   const glossaryFor = (chunkText) => allGlossary.filter((g) => g.source.toLocaleLowerCase() !== g.target.toLocaleLowerCase() && chunkText.includes(g.source));
   const tm = await store.loadTm(workId, target, level);
-  const text = await store.loadText(chapter.sourceHash);
   const chunks = chunkNovel(normalizeText(text), MAX_CHUNK);
 
   let pinned = work.models?.[target] || null;
@@ -524,7 +549,6 @@ export async function translateChapter(store, {
         });
         // Strip leftover source artefacts (stray と, 「」 …) before storing/linting.
         results[i] = cleanTranslationArtifacts(r.text.trim(), target);
-        warnings.push(...lintTranslation(chunks[i], results[i], { target, glossary: glossaryFor(chunks[i]) }));
         provider = `${r.provider}/${r.model}`;
         pinned = { provider: r.provider, model: r.model };
         usedProviders.add(provider);
@@ -565,6 +589,8 @@ export async function translateChapter(store, {
   }
 
   const translation = results.filter((v) => v !== undefined).join("\n\n");
+  // Whole-chapter lint on top of per-chunk warnings, then dedupe.
+  warnings.push(...lintTranslation(text, translation, { target, glossary: allGlossary }));
   const uniqueWarnings = dedupeWarnings(warnings);
   const hash = await store.saveText(translation);
   const tkey = `${workId}|${chapterId}|${target}|${level}`;
@@ -623,6 +649,7 @@ export async function listWorks(store, { q = "", limit = 200 } = {}) {
       // Summary only: a full work object can be hundreds of KB.
       return {
         id: w.id, title: w.title, author: w.author, lang: w.lang, sourceUrl: w.sourceUrl || "",
+        coverUrl: w.coverKey ? `/api/works/${w.id}/cover?v=${encodeURIComponent(w.coverVersion || 0)}` : null,
         createdAt: w.createdAt, updatedAt: w.updatedAt,
         languages: w.languages || [], settings: w.settings || {},
         chapterCount: w.chapters.length,
@@ -656,6 +683,7 @@ export async function getWork(store, workId) {
     .filter((v) => v.chapterCount > 0);
   return {
     id: work.id, title: work.title, author: work.author, lang: work.lang, sourceUrl: work.sourceUrl || "",
+    coverUrl: work.coverKey ? `/api/works/${work.id}/cover?v=${encodeURIComponent(work.coverVersion || 0)}` : null,
     createdAt: work.createdAt, updatedAt: work.updatedAt,
     languages: work.languages || [], settings: work.settings || {}, models: work.models || {},
     usage: work.usage || { calls: 0, chunks: 0, byModel: {} }, tmSegments: work.tmSegments || {},
@@ -772,6 +800,57 @@ export async function searchLibrary(store, { q, limit = 30 } = {}) {
 }
 
 /* ------------------------------------------------------------ delete / edit */
+
+export async function saveWorkCover(store, workId, buffer, contentType) {
+  const db = await store.load();
+  const work = db.works[workId];
+  if (!work) throw new Error("Unknown story: " + workId);
+  const ext = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" }[contentType];
+  if (!ext) throw new Error("Cover must be JPEG, PNG, WebP or GIF.");
+  const coverKey = `covers/${workId}.${ext}`;
+  const previousCoverKey = work.coverKey;
+  await store.saveBuffer(coverKey, buffer, contentType);
+  const coverVersion = Date.now();
+  await store.update((d) => {
+    const current = d.works[workId];
+    if (!current) throw new Error("Unknown story: " + workId);
+    current.coverKey = coverKey;
+    current.coverType = contentType;
+    current.coverVersion = coverVersion;
+    current.updatedAt = coverVersion;
+    logActivity(d, { type: "cover-updated", workId, detail: current.title });
+  });
+  await store.flush();
+  if (previousCoverKey && previousCoverKey !== coverKey) await store.deleteFile(previousCoverKey);
+  return { coverKey, coverType: contentType, coverVersion };
+}
+
+export async function getWorkCover(store, workId) {
+  const db = await store.load();
+  const work = db.works[workId];
+  if (!work?.coverKey) return null;
+  const body = await store.loadBuffer(work.coverKey);
+  return body ? { body, contentType: work.coverType || "application/octet-stream" } : null;
+}
+
+export async function deleteWorkCover(store, workId) {
+  const db = await store.load();
+  const work = db.works[workId];
+  if (!work) throw new Error("Unknown story: " + workId);
+  if (!work.coverKey) return { removed: false };
+  const { coverKey } = work;
+  await store.update((d) => {
+    const current = d.works[workId];
+    delete current.coverKey;
+    delete current.coverType;
+    delete current.coverVersion;
+    current.updatedAt = Date.now();
+    logActivity(d, { type: "cover-removed", workId, detail: current.title });
+  });
+  await store.flush();
+  await store.deleteFile(coverKey);
+  return { removed: true };
+}
 
 export async function updateWork(store, workId, { title, author, sourceUrl, sourceLang, settings } = {}) {
   await store.load();

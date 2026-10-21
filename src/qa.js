@@ -5,6 +5,9 @@
 const CJK = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]/g;
 const KANA_HANGUL = /[\u3040-\u30ff\uac00-\ud7af]/g;
 const CJK_TARGETS = new Set(["ja", "zh-CN", "zh-TW", "ko", "th", "my"]);
+const ENGLISH_OPENERS = new Set(`a an and are as at be been being but by can could did do does for from had has have he her him his i if in into is it its just like may might must of on or our she should so than that the their them then there these they this those to was we were well will with would you your think`.split(/\s+/));
+// Valid Swedish sentence starters that collide with English openers.
+const SV_OPENER_EXCEPTIONS = new Set(["i", "just", "som", "att", "det", "den", "han", "hon", "vi", "de", "ett", "en"]);
 
 /** Difficulty levels for the same chapter. Terms are shared; only wording changes. */
 export const DIFFICULTIES = ["easy", "medium", "hard"];
@@ -21,13 +24,12 @@ export function normalizeDifficulty(d) {
 const TRANSLATION_META_LINES = [
   /(?:^|\s)we need to (?:translate|preserve|copy)\b/i,
   /(?:^|\s)we must (?:translate|preserve|keep|leave|not change|not translate)\b/i,
-  /(?:^|\s)follow(?: these)? rules\b/i,
+  /(?:^|\s)follow(?: these)? rules\b(?=.*(?:translat|preserv|keep|glossary|paragraph|line break|untranslat))/i,
   /(?:^|\s)need to ensure\b.*(?:translation|glossary|paragraph|line break|untranslated)/i,
   /(?:^|\s)let's? (?:copy|translate|preserve|keep|break it|make sure|rewrite) each paragraph\b/i,
   /(?:^|\s)(?:now|here|below) (?:translate|we can translate|the translation|write)\b/i,
   /(?:^|\s)translate(?: the following| this passage| the passage(?: below)?)\b/i,
   /(?:^|\s)(?:here's?| here is|below is) (?:the )?translation\b/i,
-  /(?:^|\s)paragraph\s+\d+\s*:/i,
   /(?:^|\s)(?:original text|swedish|translation)\s*:/i,
   /(?:^|\s)(?:this text is in english|the user (?:asked|wants))\b/i,
   /(?:^|\s)we should (?:translate|preserve|keep)\b/i,
@@ -60,7 +62,7 @@ const TRANSLATION_META_LINES = [
   /(?:^|\s)(?:keep|leave|not change|not translate) \"[^\"]*\"/i,
   /(?:^|\s)(?:if|when) \"[^\"]*\" (?:keep|leave|translate)/i,
   /(?:^|\s)(?:it'?s|it is) (?:likely|a|probably) (?:page|formatting|glossary|translation) (?:header|error|issue|artifact)/i,
-  /(?:^|\s)(?:so|then) keep(?:ing)? (?:as is|the )/i,
+  /(?:^|\s)(?:so|then) keep(?:ing)? (?:as is|the (?:paragraph|line|glossary|translation|names?|terms?|quotes?|original)\b)/i,
   /(?:^|\s)(?:thus|i will|i'll) (?:keep|translate|leave)\b.*(?:as is|glossary|translation|untranslated|paragraph)/i,
 ];
 
@@ -70,14 +72,14 @@ export function cleanNovelArtifacts(text) {
     .replace(/\r\n?/g, "\n")
     // Remove these labels whether they are standalone or glued to prose; the
     // capture retains adjacent content while normalizing the page boundary.
-    .replace(/\n[ \t]*Page\s*\d+\s*Goldenagato\s*\|?[ \t]*(?=\n|$)/gi, "")
+    .replace(/\n[ \t]*(?:Page|Sida)\s*\d+\s*Goldenagato\s*\|?[ \t]*(?=\n|$)/gi, "")
     .replace(/\n[ \t]*Page\s*\d+\s*[\w.-]+\.(?:com|net|org|io|me|co|ru|xyz|to)\s*\|?[ \t]*(?=\n|$)/gi, "")
-    .replace(/^[ \t]*Page\s*\d+\s*Goldenagato\s*\|?[ \t]*(?=\n|$)/gim, "")
+    .replace(/^[ \t]*(?:Page|Sida)\s*\d+\s*Goldenagato\s*\|?[ \t]*(?=\n|$)/gim, "")
     .replace(/^[ \t]*Page\s*\d+\s*[\w.-]+\.(?:com|net|org|io|me|co|ru|xyz|to)\s*\|?[ \t]*(?=\n|$)/gim, "")
     .replace(/Page\s*\d+\s*Goldenagato\s*\|?/gi, " ")
     .replace(/Page\s*\d+\s*[\w.-]+\.(?:com|net|org|io|me|co|ru|xyz|to)\s*\|?/gi, " ")
     .replace(/^[ \t]*Page\s+\d+\s*$/gim, "")
-    .replace(/^[ \t]*(?:Sida|Seite|Página|Pagina|Page)\s+\d+\s*$/gim, "")
+    .replace(/^[ \t]*(?:Sida|Seite|Página|Pagina|Page)\s+\d+\s*\|?\s*$/gim, "")
     .replace(/\bPage\s*\d+\s*(?:Goldenagato|[\w.-]+\.(?:com|net|org|io|me|co|ru|xyz|to))\s*\|?/gi, " ")
     .replace(/\bSida\s*\d+\s*Goldenagato\s*\|?/gi, " ")
     .replace(/^(?:Page|Sida)\s*\d+Goldenagato\s*\|?[ \t]*$/gim, "")
@@ -171,53 +173,90 @@ export function lintTranslation(source, translation, { target = "en", glossary =
     }
   }
 
-  // 2. Glossary terms that appear in the source but not in the output.
-  const missing = new Set();
+  // 2. Glossary terms should be distinctive names/concepts, not generic words.
+  // Frequently auto-suggested terms such as "Sure" and "Like" are not reliably
+  // expected verbatim in translation and caused noisy warnings.
+  const ordinaryTerms = new Set(`a an and are as at be been being but by can could did do does for from had has have he her him his i if in into is it its just like may might must of on or our she should so than that the their them then there these they this those to was we were will with would you your well other sure let think`.split(/\s+/));
+  const isOrdinary = (value) => {
+    const words = String(value).toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
+    return words.length > 0 && words.length <= 3 && words.every((word) => ordinaryTerms.has(word));
+  };
+  const missing = [];
+  const normalize = (value) => String(value).toLocaleLowerCase().replace(/[\p{P}\p{S}]+/gu, " ").replace(/\s+/g, " ").trim();
+  const normalizedOutput = ` ${normalize(out)} `;
   for (const g of glossary || []) {
     if (!g.source || !g.target) continue;
-    const sourceTerm = String(g.source).trim();
+    const source = String(g.source).trim();
     const targetTerm = String(g.target).trim();
-    if (!sourceTerm || !targetTerm) continue;
-    const sourceNormalized = sourceTerm.toLocaleLowerCase();
-    const targetNormalized = targetTerm.toLocaleLowerCase();
-    // Identity mappings for ordinary Latin words (e.g. Sure→Sure) are not
-    // useful glossary constraints and otherwise produce case-only false alarms.
-    if (sourceNormalized === targetNormalized) continue;
-    if (termOccurs(src, sourceTerm) && !termOccurs(out, targetTerm)) {
-      missing.add(`${sourceTerm}→${targetTerm}`);
-    }
+    if (!source || !targetTerm || isOrdinary(source) || isOrdinary(targetTerm)) continue;
+    if (!src.includes(source) || normalize(source) === normalize(targetTerm)) continue;
+    // Discard punctuation in both strings, but require Latin terms to match as
+    // a whole word; "Al" must not be accepted merely because output says "also".
+    const normalizedTerm = normalize(targetTerm);
+    const containsCjk = normalizedTerm.split("").some((char) => char.charCodeAt(0) > 0x2fff);
+    if (normalizedTerm && (containsCjk ? normalize(out).includes(normalizedTerm) : normalizedOutput.includes(` ${normalizedTerm} `))) continue;
+    missing.push(`${source}→${targetTerm}`);
   }
-  if (missing.size) {
-    const terms = [...missing];
-    warnings.push({ code: "term-missing", severity: "warn", detail: `Expected term(s) missing from output: ${terms.slice(0, 6).join(", ")}`, sample: terms.slice(0, 6).join(", ") });
+  const uniqueMissing = [...new Set(missing)];
+  if (uniqueMissing.length) {
+    warnings.push({ code: "term-missing", severity: "warn", detail: `Expected distinctive term(s) missing: ${uniqueMissing.slice(0, 4).join(", ")}`, sample: uniqueMissing.slice(0, 4).join(", ") });
   }
 
-  // 3. Suspiciously short output (dropped content).
+  // 3. English discourse words copied at the start of Swedish sentences.
+  // SV_OPENER_EXCEPTIONS are valid Swedish sentence starters ("i" = in,
+  // "just" = precisely) that collide with English openers — flagging them
+  // was a false positive on real Swedish prose.
+  if (target === "sv") {
+    const leaked = [];
+    for (const sentence of out.split(/[.!?…]+|\n+/)) {
+      const first = sentence.trim().match(/^[\u201c\"'(\[]*([A-Za-z]+)/)?.[1];
+      if (first && !SV_OPENER_EXCEPTIONS.has(first.toLocaleLowerCase()) && ENGLISH_OPENERS.has(first.toLocaleLowerCase())) leaked.push(first);
+    }
+    if (leaked.length) warnings.push({ code: "english-opener", severity: "warn", detail: `Possible English sentence starter(s) in Swedish: ${[...new Set(leaked)].slice(0, 5).join(", ")}.`, sample: [...new Set(leaked)].slice(0, 5).join(", ") });
+  }
+
+  // 4. Suspiciously short output (dropped content).
   if (src.trim().length > 120 && out.trim().length < src.trim().length * 0.2) {
     warnings.push({ code: "too-short", severity: "error", detail: `Output looks too short (${out.trim().length} vs ${src.trim().length} source chars) — content may be missing.` });
   }
 
-  // 4. Repeated-text loop (a classic LLM failure).
+  // 5. Repeated-text loop (a classic LLM failure).
   const half = Math.floor(out.length / 2);
   if (out.length > 200 && out.slice(0, half).trim() === out.slice(half).trim()) {
     warnings.push({ code: "repetition", severity: "error", detail: "Output appears to repeat itself — likely a model loop." });
   }
 
-  // 5. Unbalanced quotes (formatting damage).
-  const pairs = [['"', '"'], ["\u201c", "\u201d"], ["\u00ab", "\u00bb"], ["\u300c", "\u300d"], ["\u2018", "\u2019"]];
-  const quoteCount = (mark) => [...out].reduce((count, ch, i, chars) => {
-    if (ch !== mark) return count;
-    // U+2019 is also a typographic apostrophe in contractions/possessives.
-    if (mark === "’" && isWordChar(chars[i - 1]) && isWordChar(chars[i + 1])) return count;
-    return count + 1;
-  }, 0);
-  for (const [open, close] of pairs) {
-    const a = quoteCount(open);
-    const b = quoteCount(close);
-    if (open !== close && a !== b) warnings.push({ code: "quotes", severity: "warn", detail: `Unbalanced ${open}${close} quotes (${a} vs ${b}).` });
+  // 6. Check paired dialogue delimiters. Curly apostrophes in words such as
+  // "don't" are punctuation, not dialogue quotes, and must not inflate counts.
+  // Swedish convention uses ” on both sides (”citat”); a text with no “ and
+  // an even number of ” is balanced, not "0 open, N unmatched close".
+  const quotePairs = [["“", "”"], ["‘", "’"], ["«", "»"], ["「", "」"], ["『", "』"], ["\"", "\""]];
+  const unmatched = [];
+  for (const [open, close] of quotePairs) {
+    if (open === "“" && !out.includes("“")) {
+      // Swedish-style ”...” — even count means balanced.
+      const closers = out.split("").filter((ch) => ch === "”").length;
+      if (closers % 2 === 0) continue;
+    }
+    let depth = 0;
+    let strayClose = 0;
+    for (let i = 0; i < out.length; i++) {
+      const char = out[i];
+      // Ignore apostrophes embedded inside words and possessive endings.
+      const previousIsWord = /[A-Za-z0-9À-ÖØ-öø-ÿ]/.test(out[i - 1] || "");
+      const nextIsWord = /[A-Za-z0-9À-ÖØ-öø-ÿ]/.test(out[i + 1] || "");
+      if (open === "‘" && char === close && previousIsWord && (depth === 0 || nextIsWord)) continue;
+      if (open === "‘" && char === open && previousIsWord && nextIsWord) continue;
+      if (open === close && char === open) depth = depth ? 0 : 1;
+      else if (char === open) depth++;
+      else if (char === close && depth > 0) depth--;
+      else if (char === close) strayClose++;
+    }
+    if (depth || strayClose) unmatched.push(`${open}${close}: ${depth} open, ${strayClose} unmatched close`);
   }
+  if (unmatched.length) warnings.push({ code: "quotes", severity: "warn", detail: `Unbalanced dialogue quotes (${unmatched.join("; ")}).` });
 
-  // 6. Model commentary leaking into the output.
+  // 7. Model commentary leaking into the output.
   if (/\b(here is the translation|as an ai|i cannot translate|note:)\b/i.test(out)) {
     warnings.push({ code: "commentary", severity: "warn", detail: "Output contains translator commentary instead of only the translation." });
   }

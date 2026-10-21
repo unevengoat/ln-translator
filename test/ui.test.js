@@ -56,7 +56,7 @@ describe("front-end assets", () => {
     const html = await readFile(path.join(PUBLIC, "index.html"), "utf8");
     const ids = new Set([...app.matchAll(/\$\("([A-Za-z0-9_]+)"\)/g)].map((m) => m[1]));
     // ids created dynamically at runtime are allowed
-    const dynamic = new Set(["auto_en", "auto_es", "auto_sv", "auto_de", "lvl_easy", "lvl_medium", "lvl_hard", "jobRetry"]);
+    const dynamic = new Set(["auto_en", "auto_es", "auto_sv", "auto_de", "lvl_easy", "lvl_medium", "lvl_hard", "jobRetry", "coverFile", "coverUploadBtn", "coverRemoveBtn", "avatarUploadHint"]);
     const missing = [...ids].filter((id) => !html.includes(`id="${id}"`) && !dynamic.has(id));
     assert.deepEqual(missing, [], "app.js references ids that index.html does not define: " + missing.join(", "));
   });

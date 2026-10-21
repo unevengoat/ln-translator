@@ -6,7 +6,7 @@ import path from "node:path";
 import { Store, LocalBackend } from "../src/store.js";
 import {
   hashPin, verifyPin, listProfiles, createProfile, loginProfile, authProfile, requireProfile,
-  updateProfile, deleteProfile, getState, patchState, publicProfile,
+  updateProfile, deleteProfile, getState, patchState, publicProfile, saveProfileAvatar, getProfileAvatar,
 } from "../src/profiles.js";
 import { parseBuffer } from "../src/files.js";
 
@@ -44,6 +44,21 @@ describe("profiles", () => {
     assert.deepEqual(list.map((p) => p.name).sort(), ["Alex", "Sam"]);
   });
 
+  it("saves and replaces a custom profile picture without exposing binary metadata publicly", async () => {
+    const [alex] = (await listProfiles(store)).filter((p) => p.name === "Alex");
+    const first = Buffer.from([0, 1, 2, 255]);
+    const saved = await saveProfileAvatar(store, alex.id, first, "image/png");
+    assert.match(saved.avatarUrl, new RegExp(`/api/profiles/${alex.id}/avatar\\?v=`));
+    assert.equal(saved.avatarKey, undefined);
+    assert.equal(saved.avatarType, undefined);
+    assert.deepEqual((await getProfileAvatar(store, alex.id)).body, first);
+
+    const second = Buffer.from([9, 8, 7]);
+    await saveProfileAvatar(store, alex.id, second, "image/jpeg");
+    assert.deepEqual((await getProfileAvatar(store, alex.id)).body, second);
+    assert.equal(await store.loadBuffer(`avatars/${alex.id}.png`), null);
+    await assert.rejects(() => saveProfileAvatar(store, alex.id, second, "image/svg+xml"), /JPEG, PNG, WebP or GIF/);
+  });
   it("logs in with the PIN and issues a working token", async () => {
     const [alex] = (await listProfiles(store)).filter((p) => p.name === "Alex");
     await assert.rejects(() => loginProfile(store, alex.id, "0000"), /Wrong PIN/);

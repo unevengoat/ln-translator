@@ -29,6 +29,7 @@ export function buildSystemPrompt({ sourceName, targetName, keepHonorifics = tru
     '3. Preserve dialogue formatting, inner monologue, emphasis, and onomatopoeia (naturalize SFX, e.g. ドキドキ -> "badump").',
     "4. Keep the same POV and tense as the original throughout.",
     "5. NEVER leave any source-script character in the output (no kana, hangul, hanzi, particles like と/は/が). Convert 「」『』 to normal target-language quotation marks.",
+    targetName === "Swedish" ? "6. SWEDISH ONLY: Use idiomatic, native Swedish phrasing; do not calque English expressions or titles word-for-word when they sound unnatural. Every Swedish sentence must begin with a Swedish word. Translate English discourse starters (for example 'Well,' → 'Nå,'/'Tja,', 'Think' → 'Tänk') instead of copying them. Keep English only for proper names, established terms, and text explicitly quoted in the source. Before answering, scan each sentence start for leftover English." : null,
     `6. ${honorificLine}`,
     `7. ${formalityLine}`,
     `8. READING LEVEL — ${difficulty.toUpperCase()}: ${level}`,
@@ -54,6 +55,7 @@ export function languageName(code, fallback = code) {
   const map = {
     auto: "the source language (auto-detected)",
     en: "English",
+    sv: "Swedish",
     ja: "Japanese",
     "zh-CN": "Simplified Chinese",
     "zh-TW": "Traditional Chinese",

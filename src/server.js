@@ -14,11 +14,12 @@ import {
   correctTerm, suggestTerms, stats, searchLibrary, activityFeed, updateWork, deleteChapter, deleteWork,
   restoreVersion, importGlossary, exportGlossary, cleanTerms, deleteTerm, refreshTerms, splitChapters, sortChapters,
   DIFFICULTIES, DEFAULT_DIFFICULTY, cleanTranslationArtifacts, cleanExistingFrontMatter,
+  saveWorkCover, getWorkCover, deleteWorkCover,
 } from "./library.js";
 import { normalizeDifficulty } from "./qa.js";
 import {
   listProfiles, createProfile, loginProfile, logoutProfile, authProfile, requireProfile,
-  updateProfile, deleteProfile, getState, patchState,
+  updateProfile, deleteProfile, getState, patchState, saveProfileAvatar, getProfileAvatar,
 } from "./profiles.js";
 import { PRIMARY, BACKUP, poolStatus, configuredProviders } from "./engines/models.js";
 
@@ -44,8 +45,8 @@ async function persistJob(job) {
       db.jobs[job.id] = {
         id: job.id, type: job.type, state: job.state, done: job.done, total: job.total,
         current: job.current || "", error: job.error || null, errors: (job.errors || []).slice(-5),
-        workId: job.workId || null, targets: job.targets || [], difficulties: job.difficulties || [],
-        startedAt: job.startedAt, finishedAt: job.finishedAt || null,
+        workId: job.workId || null, chapterId: job.chapterId || null, targets: job.targets || [], difficulties: job.difficulties || [],
+        startedAt: job.startedAt, finishedAt: job.finishedAt || null, result: job.result || null,
       };
       const ids = Object.keys(db.jobs);
       if (ids.length > 40) for (const id of ids.slice(0, ids.length - 40)) delete db.jobs[id];
@@ -214,6 +215,7 @@ const server = createServer(async (req, res) => {
       const storageInfo = store.backend?.info ? await store.backend.info().catch(() => null) : null;
       return json(res, 200, {
         ok: true, at: Date.now(), storage: store.backendName, storageDescription: store.describe(), storageInfo,
+        localStorageWarning: store.backendName === "local-disk" ? "This workspace is using its own local disk store. It is separate from the live library; use the connected durable backend to see production data." : null,
         keys: { groq: !!process.env.GROQ_API_KEY, gemini: !!process.env.GEMINI_API_KEY },
         providers: configuredProviders(),
         pool: poolStatus(),
@@ -289,6 +291,21 @@ const server = createServer(async (req, res) => {
         const b = await readJson(req);
         return json(res, 200, await loginProfile(store, id, b.pin));
       }
+      if (seg.length === 4 && seg[3] === "avatar" && method === "GET") {
+        const avatar = await getProfileAvatar(store, id);
+        if (!avatar) return json(res, 404, { error: "No profile picture uploaded." });
+        res.writeHead(200, { "Content-Type": avatar.contentType, "Content-Length": avatar.body.length, "Cache-Control": "public, max-age=3600" });
+        return res.end(avatar.body);
+      }
+      if (seg.length === 4 && seg[3] === "avatar" && method === "POST") {
+        await requireProfile(store, id, token);
+        const b = await readJson(req, 2_100_000);
+        const match = /^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/]*={0,2})$/.exec(String(b.dataUrl || ""));
+        if (!match) throw new Error("Choose a JPEG, PNG, WebP or GIF profile picture.");
+        const body = Buffer.from(match[2], "base64");
+        if (!body.length || body.length > 1_500_000) throw new Error("Profile pictures must be under 1.5 MB.");
+        return json(res, 200, { profile: await saveProfileAvatar(store, id, body, match[1]) });
+      }
       if (seg.length === 4 && seg[3] === "state" && method === "GET") {
         await requireProfile(store, id, token);
         return json(res, 200, await getState(store, id));
@@ -304,14 +321,19 @@ const server = createServer(async (req, res) => {
         return json(res, 200, await updateProfile(store, id, b));
       }
       if (seg.length === 3 && method === "DELETE") {
-        await requireProfile(store, id, token);
+        const actor = await authProfile(store, token);
+        if (!actor) {
+          const error = new Error("Sign in to manage profiles.");
+          error.status = 401;
+          throw error;
+        }
         return json(res, 200, await deleteProfile(store, id));
       }
     }
 
     /* ---- library ---- */
     if (pathname === "/api/works" && method === "GET") {
-      store.maybeRefresh?.(120000).catch(() => {});
+      await store.maybeRefresh?.(120000);
       return json(res, 200, await listWorks(store, { q: q.q || "" }));
     }
     if (pathname === "/api/works" && method === "POST") {
@@ -391,6 +413,25 @@ const server = createServer(async (req, res) => {
         }));
       }
       if (seg.length === 3 && method === "DELETE") return json(res, 200, await deleteWork(store, { workId }));
+
+      if (seg[3] === "cover" && seg.length === 4 && method === "GET") {
+        const cover = await getWorkCover(store, workId);
+        if (!cover) return json(res, 404, { error: "No cover uploaded" });
+        res.writeHead(200, { "Content-Type": cover.contentType, "Content-Length": cover.body.length, "Cache-Control": "public, max-age=3600" });
+        return res.end(cover.body);
+      }
+      if (seg[3] === "cover" && seg.length === 4 && method === "POST") {
+        const b = await readJson(req, 2_100_000);
+        const match = /^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/]*={0,2})$/.exec(String(b.dataUrl || ""));
+        if (!match) throw new Error("Choose a JPEG, PNG, WebP or GIF cover image.");
+        const body = Buffer.from(match[2], "base64");
+        if (!body.length || body.length > 1_500_000) throw new Error("Cover images must be under 1.5 MB.");
+        const result = await saveWorkCover(store, workId, body, match[1]);
+        return json(res, 200, { ok: true, ...result });
+      }
+      if (seg[3] === "cover" && seg.length === 4 && method === "DELETE") {
+        return json(res, 200, await deleteWorkCover(store, workId));
+      }
 
       if (seg[3] === "translate-all" && method === "POST") {
         const b = await readJson(req);
@@ -475,7 +516,7 @@ const server = createServer(async (req, res) => {
     if (method === "GET" || method === "HEAD") return serveStatic(req, res);
     return json(res, 404, { error: "not found" });
   } catch (e) {
-    return json(res, 400, { error: e.message });
+    return json(res, e.status || 400, { error: e.message });
   }
 });
 

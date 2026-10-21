@@ -21,6 +21,7 @@ const LIMITS = {
 };
 
 const state = new Map();
+const providerQueues = new Map();
 const envNum = (k, d) => (process.env[k] !== undefined ? Number(process.env[k]) : d);
 
 function st(provider) {
@@ -61,12 +62,86 @@ export function poolStatus() {
   }));
 }
 
-function readyNow(s) {
+function readyNow(s, now = Date.now()) {
   if (s.disabled) return false;
-  if (s.cooldownUntil > Date.now()) return false;
+  if (s.cooldownUntil > now) return false;
   if (s.inFlight >= s.maxConcurrent) return false;
-  if (Date.now() - s.lastAt < s.minGapMs && s.inFlight > 0) return false;
+  if (now - s.lastAt < s.minGapMs) return false;
   return true;
+}
+
+function waitForNextProvider() {
+  const now = Date.now();
+  const nextReadyIn = [...state.values()].filter((s) => !s.disabled).map((s) =>
+    Math.max(s.cooldownUntil - now, s.lastAt + s.minGapMs - now, 0)
+  );
+  if (!nextReadyIn.length) return sleep(250);
+  const soonest = Math.min(...nextReadyIn);
+  return sleep(Math.min(Math.max(soonest, 50), 4000));
+}
+
+function finishProviderRequest(s) {
+  s.inFlight = Math.max(0, s.inFlight - 1);
+}
+
+async function reserveProviderSlot(s, deadline) {
+  while (Date.now() < deadline) {
+    const now = Date.now();
+    if (readyNow(s, now)) {
+      // Reserve synchronously after the readiness check so parallel waiters
+      // cannot all pass the same provider's concurrency limit.
+      s.lastAt = now;
+      s.inFlight++;
+      return true;
+    }
+    const waitMs = Math.max(s.cooldownUntil - now, s.lastAt + s.minGapMs - now, 100);
+    await sleep(Math.min(waitMs, 4000));
+  }
+  return false;
+}
+
+/** Keep provider requests serialized, paced, and ordered during cooldown waits. */
+function withProviderQueue(provider, task) {
+  const previous = providerQueues.get(provider) || Promise.resolve();
+  const current = previous.catch(() => {}).then(task);
+  const tail = current.then(() => {}, () => {});
+  providerQueues.set(provider, tail);
+  return current.finally(() => {
+    if (providerQueues.get(provider) === tail) providerQueues.delete(provider);
+  });
+}
+
+function coolDown(s, message) {
+  if (!isTransient(message)) return;
+  const wait = Math.max(retryAfterMs(message), s.cooldownMs);
+  s.cooldownUntil = Date.now() + wait;
+  s.rateLimited++;
+  if (/quota|exceeded your current/i.test(message)) s.cooldownUntil = Date.now() + Math.max(wait, 300000);
+}
+
+/** Translate a pinned model while honoring the same provider pacing as the pool. */
+export async function translatePinned(chunk, opts = {}, pinned, { maxWaitMs } = {}) {
+  const s = st(pinned.provider);
+  return withProviderQueue(pinned.provider, async () => {
+    const deadline = Date.now() + (maxWaitMs ?? envNum("POOL_DEADLINE_MS", 300000));
+    if (!await reserveProviderSlot(s, deadline)) {
+      throw new PoolExhaustedError(`Timed out waiting for ${pinned.provider} pacing/cooldown.`);
+    }
+    try {
+      const config = resolveProvider(pinned.provider, { model: pinned.model, timeoutMs: opts.timeoutMs });
+      const text = await translateAiChunk(chunk, { ...opts, config });
+      finishProviderRequest(s);
+      s.ok++;
+      s.modelIndex = 0;
+      return { text, provider: pinned.provider, model: config.model, attempts: [{ provider: `${pinned.provider}/${config.model}`, ok: true }] };
+    } catch (e) {
+      finishProviderRequest(s);
+      s.failed++;
+      s.lastError = String(e.message).slice(0, 200);
+      coolDown(s, e.message);
+      throw e;
+    }
+  });
 }
 
 /** Best provider to use next: idle capacity first, then longest-resting. */
@@ -97,43 +172,51 @@ export async function translatePooled(chunk, opts = {}, { maxWaitMs } = {}) {
   const attempts = [];
   const excluded = new Set();
   const allow = Array.isArray(opts.providers) && opts.providers.length ? opts.providers : null;
-  const budget = maxWaitMs ?? envNum("POOL_DEADLINE_MS", 90000);
+  const budget = maxWaitMs ?? envNum("POOL_DEADLINE_MS", 300000);
   const deadline = Date.now() + budget;
 
   while (Date.now() < deadline) {
+    const pool = allow ? allow : configuredProviders().map((c) => c.provider);
+    if (!pool.length) break;
     const s = pick(excluded, allow);
     if (!s) {
-      // nothing ready: wait a moment for a slot / cooldown to end
-      const soonest = Math.min(...[...state.values()].map((x) => Math.max(0, x.cooldownUntil - Date.now())), 2000);
-      await sleep(Math.min(Math.max(soonest, 100), 4000));
-      const pool = allow ? allow : configuredProviders().map((c) => c.provider);
+      // Nothing is ready: wait for a provider's pacing gap or cooldown to end.
+      await waitForNextProvider();
       if (excluded.size && excluded.size >= pool.length) excluded.clear(); // give everything another chance
       continue;
     }
     const provider = s.provider;
     const model = modelFor(s);
-    s.inFlight++;
-    s.lastAt = Date.now();
     try {
-      const config = resolveProvider(provider, { model });
-      const text = await translateAiChunk(chunk, { ...opts, config });
-      s.inFlight--;
-      s.ok++;
-      s.modelIndex = 0;
-      attempts.push({ provider: `${provider}/${config.model}`, ok: true });
-      return { text, provider, model: config.model, attempts };
+      const result = await withProviderQueue(provider, async () => {
+        if (!await reserveProviderSlot(s, deadline)) return null;
+        try {
+          const config = resolveProvider(provider, { model });
+          const text = await translateAiChunk(chunk, { ...opts, config });
+          finishProviderRequest(s);
+          s.ok++;
+          s.modelIndex = 0;
+          return { text, provider, model: config.model, attempts: [{ provider: `${provider}/${config.model}`, ok: true }] };
+        } catch (e) {
+          finishProviderRequest(s);
+          s.failed++;
+          s.lastError = String(e.message).slice(0, 200);
+          coolDown(s, e.message);
+          throw e;
+        }
+      });
+      if (result) {
+        attempts.push(...result.attempts);
+        return { ...result, attempts };
+      }
+      excluded.add(provider);
+      if (excluded.size >= pool.length) {
+        excluded.clear();
+        await waitForNextProvider();
+      }
     } catch (e) {
-      s.inFlight--;
-      s.failed++;
-      s.lastError = String(e.message).slice(0, 200);
-      attempts.push({ provider: `${provider}/${model}`, ok: false, error: s.lastError.slice(0, 160) });
-
-      if (isTransient(e.message)) {
-        const wait = Math.max(retryAfterMs(e.message), s.cooldownMs);
-        s.cooldownUntil = Date.now() + wait;
-        s.rateLimited++;
-        if (/quota|exceeded your current/i.test(e.message)) s.cooldownUntil = Date.now() + Math.max(wait, 300000); // daily quota → long rest
-      } else {
+      attempts.push({ provider: `${provider}/${model}`, ok: false, error: String(e.message).slice(0, 160) });
+      if (!isTransient(e.message)) {
         // Model retired? Walk this provider's model list, and after two misses
         // stop using the provider for this session (it would just waste attempts).
         s.modelIndex++;
