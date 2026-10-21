@@ -19,7 +19,7 @@ import {
   saveWorkCover, getWorkCover, deleteWorkCover,
 } from "../src/library.js";
 import { mergeTerms, termsGlossary, canonicalFor, extractCandidates, termsToCsv, termCounts, latinCandidates, cleanNoisyTerms } from "../src/terms.js";
-import { lintTranslation, dedupeWarnings, summarizeWarnings, normalizeDifficulty, cleanTranslationArtifacts, DIFFICULTIES } from "../src/qa.js";
+import { lintTranslation, dedupeWarnings, summarizeWarnings, normalizeDifficulty, cleanNovelArtifacts, cleanTranslationArtifacts, DIFFICULTIES } from "../src/qa.js";
 import { isModelGone, pickCandidates, translateWithPolicy } from "../src/engines/models.js";
 import { translatePinned } from "../src/engines/pool.js";
 
@@ -333,6 +333,20 @@ describe("leftover-artifact cleanup", () => {
     assert.equal(clean, "Prologue\n\nThis is the actual story.\n\nThe hero said, ‘Keep the glossary terms unchanged.’ Then she left.\n\nThe next scene begins here.");
     assert.doesNotMatch(clean, /Page \d+Goldenagato/);
     assert.doesNotMatch(clean, /Translate the passage/);
+  });
+
+  it("removes translator process narration without damaging story prose", () => {
+    const messy = [
+      "We need to keep the opening quote style.",
+      "Jag gick hem.",
+      "The original uses double quotes.",
+      "Vi stannade kvar.",
+      "We'll translate each line accordingly.",
+      "Han väntade.",
+    ].join("\n\n");
+    assert.equal(cleanTranslationArtifacts(messy, "sv"), "Jag gick hem.\n\nVi stannade kvar.\n\nHan väntade.");
+    // Story dialogue about keeping things is not narration and must survive.
+    assert.equal(cleanNovelArtifacts("So keep the faith!\n\nWe'll keep the light on."), "So keep the faith!\n\nWe'll keep the light on.");
   });
 
   it("removes page headers from imported plain text while retaining adjacent prose", async () => {
